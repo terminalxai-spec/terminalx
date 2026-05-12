@@ -1,0 +1,20 @@
+{
+  "name": "TerminalX Agent OS",
+  "short_name": "TerminalX",
+  "description": "Mobile dashboard for TerminalX agents, tasks, approvals, files, and settings.",
+  "start_url": "/#command-center",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#05070d",
+  "theme_color": "#05070d",
+  "categories": ["productivity", "developer", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

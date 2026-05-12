@@ -1,0 +1,21 @@
+{
+  "name": "terminalx-mvp-foundation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MVP foundation for TerminalX, a multi-agent AI operating system.",
+  "scripts": {
+    "dev": "node services/api/src/server.js",
+    "start": "node services/api/src/server.js",
+    "test": "npm run test:backend && npm run build",
+    "test:backend": "node scripts/test-backend.js",
+    "build": "node scripts/build-frontend.js",
+    "db:init": "node scripts/db-init.js",
+    "db:migrate": "node scripts/db-migrate.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
