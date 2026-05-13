@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const publicRoot = path.resolve(__dirname, "../apps/dashboard/public");
+const vercelPublicRoot = path.resolve(__dirname, "../public");
 const requiredFiles = [
   "index.html",
   "styles.css",
@@ -12,10 +13,25 @@ const requiredFiles = [
   "icons/icon.svg"
 ];
 
+function copyDirectory(source, destination) {
+  fs.mkdirSync(destination, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const sourcePath = path.join(source, entry.name);
+    const destinationPath = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectory(sourcePath, destinationPath);
+    } else {
+      fs.copyFileSync(sourcePath, destinationPath);
+    }
+  }
+}
+
 for (const file of requiredFiles) {
   const fullPath = path.join(publicRoot, file);
   assert.ok(fs.existsSync(fullPath), `Missing frontend asset: ${file}`);
 }
+
+copyDirectory(publicRoot, vercelPublicRoot);
 
 const indexHtml = fs.readFileSync(path.join(publicRoot, "index.html"), "utf8");
 assert.match(indexHtml, /<meta name="viewport"/, "Dashboard must include mobile viewport metadata");

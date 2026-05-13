@@ -3,10 +3,265 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta http-equiv="refresh" content="0; url=/" />
-    <title>TerminalX</title>
+    <meta name="theme-color" content="#05070d" />
+    <meta name="description" content="TerminalX mobile dashboard for agents, tasks, approvals, files, and settings." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="TerminalX" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>TerminalX Dashboard</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/icon.svg" />
+    <link rel="stylesheet" href="/styles.css?v=terminalx-chat-2" />
   </head>
   <body>
-    <p>Loading TerminalX...</p>
+    <section id="auth-screen" class="auth-screen">
+      <form id="login-form" class="login-panel">
+        <span class="brand-mark">TX</span>
+        <div>
+          <p class="eyebrow">TerminalX Access</p>
+          <h1>Sign in</h1>
+        </div>
+        <input id="login-email" type="email" autocomplete="email" placeholder="Email" required />
+        <input id="login-password" type="password" autocomplete="current-password" placeholder="Password" required />
+        <button type="submit">Login</button>
+        <div id="login-result" class="command-result">Use your TerminalX account.</div>
+      </form>
+    </section>
+
+    <div id="app-shell" class="app-shell hidden">
+      <aside class="sidebar">
+        <a class="brand" href="#command-center" aria-label="TerminalX Command Center">
+          <span class="brand-mark">TX</span>
+          <span>
+            <strong>TerminalX</strong>
+            <small>Agent OS</small>
+          </span>
+        </a>
+
+        <nav class="nav" aria-label="Dashboard pages">
+          <a href="#command-center" class="nav-link active" data-page-link="command-center">Command Center</a>
+          <a href="#chat" class="nav-link" data-page-link="chat">Chat</a>
+          <a href="#agents" class="nav-link" data-page-link="agents">Agents</a>
+          <a href="#tasks" class="nav-link" data-page-link="tasks">Tasks</a>
+          <a href="#approvals" class="nav-link" data-page-link="approvals">Approval Queue</a>
+          <a href="#files" class="nav-link" data-page-link="files">Files</a>
+          <a href="#settings" class="nav-link" data-page-link="settings">Settings</a>
+        </nav>
+
+        <div class="sidebar-status">
+          <span id="health-dot" class="status-dot"></span>
+          <span id="health-pill">Checking runtime</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">TerminalX Command Layer</p>
+            <h1 id="page-title">Command Center</h1>
+          </div>
+          <div class="topbar-actions">
+            <span id="current-user" class="muted"></span>
+            <button id="create-task-button" class="secondary-button" type="button">Demo Task</button>
+            <button id="logout-button" class="secondary-button" type="button">Logout</button>
+          </div>
+        </header>
+
+        <section class="command-deck" aria-label="CEO Agent command input">
+          <form id="command-form" class="command-form">
+            <span class="prompt-prefix">&gt;</span>
+            <input
+              id="command-input"
+              name="command"
+              type="text"
+              placeholder="Command TerminalX: build, test, write, trade, analyze..."
+              autocomplete="off"
+            />
+            <button type="submit">Run</button>
+          </form>
+          <div id="command-result" class="command-result">CEO Agent is standing by.</div>
+        </section>
+
+        <section id="command-center" class="page active" data-page="command-center">
+          <div class="metric-grid">
+            <article class="metric-card">
+              <span>Agents</span>
+              <strong id="metric-agents">0</strong>
+            </article>
+            <article class="metric-card">
+              <span>Tasks</span>
+              <strong id="metric-tasks">0</strong>
+            </article>
+            <article class="metric-card">
+              <span>Pending</span>
+              <strong id="metric-approvals">0</strong>
+            </article>
+            <article class="metric-card">
+              <span>Files</span>
+              <strong id="metric-files">0</strong>
+            </article>
+          </div>
+
+          <div class="dashboard-grid">
+            <article class="panel wide-panel">
+              <div class="panel-heading">
+                <h2>Agent Status</h2>
+                <span class="panel-kicker">live registry</span>
+              </div>
+              <div id="agent-status-cards" class="agent-grid"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Recent Tasks</h2>
+                <span class="panel-kicker">task stream</span>
+              </div>
+              <div id="recent-tasks-list" class="stack"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Pending Approvals</h2>
+                <span class="panel-kicker">human gate</span>
+              </div>
+              <div id="home-approvals-list" class="stack"></div>
+            </article>
+
+            <article class="panel wide-panel">
+              <div class="panel-heading">
+                <h2>Chat History</h2>
+                <span class="panel-kicker">conversation memory</span>
+              </div>
+              <div id="chat-history-list" class="stack"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="chat" class="page" data-page="chat">
+          <div class="chat-shell">
+            <aside class="chat-rail panel" aria-label="Conversations">
+              <div class="panel-heading">
+                <h2>Conversations</h2>
+                <span class="panel-kicker">memory</span>
+              </div>
+              <div id="chat-conversation-list" class="chat-conversation-list"></div>
+            </aside>
+
+            <article class="chat-thread panel" aria-label="Chat Agent">
+              <div class="panel-heading">
+                <h2>Chat Agent</h2>
+                <span id="chat-status" class="panel-kicker">ready</span>
+              </div>
+              <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+              <div id="chat-typing-indicator" class="typing-indicator hidden" aria-live="polite">
+                <span></span>
+                <span></span>
+                <span></span>
+                Chat Agent is typing
+              </div>
+              <form id="chat-form" class="chat-composer">
+                <div class="chat-tools">
+                  <select id="chat-file-selector" aria-label="Select file">
+                    <option value="">Select file</option>
+                  </select>
+                  <select id="chat-task-selector" aria-label="Select task">
+                    <option value="">Select task</option>
+                  </select>
+                  <button id="chat-summarize-file-button" class="secondary-button" type="button">Summarize selected file</button>
+                  <button id="chat-explain-task-button" class="secondary-button" type="button">Explain selected task</button>
+                  <button id="chat-create-task-button" class="secondary-button" type="button">Create Task from this chat</button>
+                </div>
+                <div class="chat-input-row">
+                  <textarea
+                    id="chat-input"
+                    name="message"
+                    rows="3"
+                    placeholder="Message TerminalX Chat Agent..."
+                  ></textarea>
+                  <button id="chat-send-button" type="submit">Send</button>
+                </div>
+              </form>
+            </article>
+          </div>
+        </section>
+
+        <section id="agents" class="page" data-page="agents">
+          <div class="panel">
+            <div class="panel-heading">
+              <h2>Agents</h2>
+              <span class="panel-kicker">CEO, Coding, Testing, Content, Trading, Chat</span>
+            </div>
+            <div id="agents-list" class="agent-grid"></div>
+          </div>
+        </section>
+
+        <section id="tasks" class="page" data-page="tasks">
+          <div class="panel">
+            <div class="panel-heading">
+              <h2>Tasks</h2>
+              <span class="panel-kicker">history and routing</span>
+            </div>
+            <div id="tasks-list" class="stack"></div>
+          </div>
+        </section>
+
+        <section id="approvals" class="page" data-page="approvals">
+          <div class="dashboard-grid">
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Approval Queue</h2>
+                <span class="panel-kicker">pending risky actions</span>
+              </div>
+              <div id="approvals-list" class="stack"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Action Log</h2>
+                <span class="panel-kicker">audit trail</span>
+              </div>
+              <div id="action-log-list" class="stack"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="files" class="page" data-page="files">
+          <div class="panel">
+            <div class="panel-heading">
+              <h2>Files</h2>
+              <span class="panel-kicker">online storage placeholder</span>
+            </div>
+            <form id="file-upload-form" class="file-form">
+              <input id="file-upload-input" type="file" />
+              <input id="file-task-input" type="text" placeholder="Optional task id" />
+              <button type="submit">Upload</button>
+            </form>
+            <div id="file-result" class="command-result">No file action yet.</div>
+            <div id="files-list" class="stack"></div>
+          </div>
+        </section>
+
+        <section id="settings" class="page" data-page="settings">
+          <div class="dashboard-grid">
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Runtime</h2>
+                <span class="panel-kicker">environment</span>
+              </div>
+              <div id="settings-runtime" class="settings-grid"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Permissions</h2>
+                <span class="panel-kicker">policy modes</span>
+              </div>
+              <div id="settings-permissions" class="stack"></div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js?v=terminalx-chat-2"></script>
   </body>
 </html>
