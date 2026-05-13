@@ -187,6 +187,7 @@ function arrayBufferToBase64(buffer) {
 
 function showPage(pageId) {
   const nextPage = pageTitles[pageId] ? pageId : "command-center";
+  document.body.dataset.currentPage = nextPage;
 
   document.querySelectorAll("[data-page]").forEach((page) => {
     page.classList.toggle("active", page.dataset.page === nextPage);

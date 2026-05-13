@@ -121,6 +121,9 @@ async function answerWithLlm({ message, intent, llmProvider }) {
     return null;
   }
 
+  const timeoutMs = Number(process.env.CHAT_LLM_TIMEOUT_MS || process.env.LLM_TIMEOUT_MS || 8000);
+  const maxTokens = Number(process.env.CHAT_MAX_TOKENS || 500);
+
   try {
     const result = await llmProvider.sendMessage({
       system: [
@@ -131,7 +134,8 @@ async function answerWithLlm({ message, intent, llmProvider }) {
       ].join(" "),
       message: [`Intent: ${intent}`, `User: ${message}`].join("\n"),
       temperature: 0.3,
-      maxTokens: 900
+      maxTokens,
+      timeoutMs
     });
 
     return result.text;

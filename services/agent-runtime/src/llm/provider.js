@@ -70,6 +70,24 @@ function parseIntentFromText(text) {
   return match ? match[1] : "chat";
 }
 
+async function timedFetch(url, options = {}, timeoutMs = Number(process.env.LLM_TIMEOUT_MS || 10000)) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: options.signal || controller.signal
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`AI provider request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 class BaseLlmProvider {
   constructor(config, options = {}) {
     this.config = config;
@@ -347,28 +365,32 @@ class GroqProvider extends BaseLlmProvider {
       return new MockLlmProvider(this.config, "GROQ_API_KEY is missing.").sendMessage(payload);
     }
 
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.apiKey}`,
-        "content-type": "application/json"
+    const response = await timedFetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages: [
+            {
+              role: "system",
+              content: payload.system || "You are TerminalX."
+            },
+            {
+              role: "user",
+              content: payload.message || payload.prompt || ""
+            }
+          ],
+          temperature: payload.temperature,
+          max_completion_tokens: payload.maxTokens || 500
+        })
       },
-      body: JSON.stringify({
-        model: this.model,
-        messages: [
-          {
-            role: "system",
-            content: payload.system || "You are TerminalX."
-          },
-          {
-            role: "user",
-            content: payload.message || payload.prompt || ""
-          }
-        ],
-        temperature: payload.temperature,
-        max_completion_tokens: payload.maxTokens || 800
-      })
-    });
+      payload.timeoutMs || Number(process.env.LLM_TIMEOUT_MS || 10000)
+    );
 
     if (!response.ok) {
       throw new Error(`Groq request failed: ${response.status} ${await response.text()}`);
