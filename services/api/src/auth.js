@@ -58,12 +58,13 @@ function readSessionToken(req) {
 }
 
 function sessionCookie(token, maxAgeSeconds = 60 * 60 * 24 * 7) {
-  const secure = process.env.AUTH_COOKIE_SECURE === "true" ? "; Secure" : "";
+  const secure = process.env.AUTH_COOKIE_SECURE === "true" || process.env.VERCEL ? "; Secure" : "";
   return `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}${secure}`;
 }
 
 function clearSessionCookie() {
-  return `${sessionCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+  const secure = process.env.AUTH_COOKIE_SECURE === "true" || process.env.VERCEL ? "; Secure" : "";
+  return `${sessionCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`;
 }
 
 function safeUser(user) {

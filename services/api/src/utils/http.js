@@ -13,7 +13,11 @@ const contentTypes = {
 };
 
 function sendJson(res, statusCode, payload, headers = {}) {
-  res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8", ...headers });
+  res.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    ...headers
+  });
   res.end(JSON.stringify(payload, null, 2));
 }
 

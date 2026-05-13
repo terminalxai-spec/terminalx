@@ -32,8 +32,20 @@ function can(permission) {
   return currentPermissions.includes(permission);
 }
 
+function apiFetch(path, options = {}) {
+  return fetch(path, {
+    ...options,
+    credentials: "include",
+    cache: "no-store",
+    headers: {
+      ...(options.body && !options.headers?.["content-type"] ? { "content-type": "application/json" } : {}),
+      ...(options.headers || {})
+    }
+  });
+}
+
 async function getJson(path) {
-  const response = await fetch(path);
+  const response = await apiFetch(path);
   if (response.status === 401) {
     showLogin();
   }
@@ -79,7 +91,7 @@ function toggleSidebar() {
 }
 
 async function checkSession() {
-  const response = await fetch("/api/auth/me");
+  const response = await apiFetch("/api/auth/me");
   if (!response.ok) {
     showLogin("Login required.");
     return false;
@@ -811,7 +823,7 @@ async function uploadFile(event) {
 
 async function uploadFileObject(file, taskId = "") {
   const content = arrayBufferToBase64(await file.arrayBuffer());
-  const response = await fetch("/api/files/upload", {
+  const response = await apiFetch("/api/files/upload", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -868,7 +880,7 @@ async function handleFileAction(event) {
   }
 
   if (action === "delete") {
-    const response = await fetch(`/api/files/${fileId}`, { method: "DELETE" });
+    const response = await apiFetch(`/api/files/${fileId}`, { method: "DELETE" });
     const payload = await response.json();
     result.textContent =
       payload.status === "approval_required"
@@ -883,7 +895,7 @@ async function createDemoTask() {
   if (!can("tasks:create")) {
     return;
   }
-  const response = await fetch("/api/tasks", {
+  const response = await apiFetch("/api/tasks", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -916,7 +928,7 @@ async function sendCommand(event) {
     return;
   }
 
-  const response = await fetch("/api/command", {
+  const response = await apiFetch("/api/command", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ command })
@@ -980,7 +992,7 @@ async function sendChatRequest(overrides = {}) {
   renderAttachmentPreview();
   stopGeneration = false;
   setChatStatus("thinking", true);
-  const response = await fetch("/api/chat", {
+  const response = await apiFetch("/api/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1079,7 +1091,7 @@ async function createTaskFromChat() {
   }
 
   setChatStatus("routing", true);
-  const response = await fetch("/api/command", {
+  const response = await apiFetch("/api/command", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1239,7 +1251,7 @@ function renderTaskDrawer(task) {
 async function login(event) {
   event.preventDefault();
   const result = document.getElementById("login-result");
-  const response = await fetch("/api/auth/login", {
+  const response = await apiFetch("/api/auth/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1259,7 +1271,7 @@ async function login(event) {
 }
 
 async function logout() {
-  await fetch("/api/auth/logout", { method: "POST" });
+  await apiFetch("/api/auth/logout", { method: "POST" });
   showLogin("Logged out.");
 }
 
@@ -1274,7 +1286,7 @@ async function decideApproval(event) {
 
   const action = button.dataset.approvalAction;
   const approvalId = button.dataset.approvalId;
-  await fetch(`/api/approvals/${approvalId}/${action}`, {
+  await apiFetch(`/api/approvals/${approvalId}/${action}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ decidedBy: "dashboard" })
