@@ -11,6 +11,14 @@ function compactText(value, limit = 4000) {
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
+function sanitizeProviderError(provider, status, body) {
+  const text = compactText(body, 220);
+  if (/invalid|api.?key|unauthorized|forbidden|token|secret/i.test(text)) {
+    return `${provider} request failed: ${status} authentication rejected`;
+  }
+  return `${provider} request failed: ${status} ${text}`;
+}
+
 function extractOpenAiText(payload) {
   if (payload.output_text) {
     return payload.output_text;
@@ -393,7 +401,7 @@ class GroqProvider extends BaseLlmProvider {
     );
 
     if (!response.ok) {
-      throw new Error(`Groq request failed: ${response.status} ${await response.text()}`);
+      throw new Error(sanitizeProviderError("Groq", response.status, await response.text()));
     }
 
     const data = await response.json();

@@ -116,6 +116,17 @@ function answerGeneralQuestion(message) {
   ].join("\n");
 }
 
+function providerFallbackNotice(error) {
+  const message = String(error?.message || "");
+  if (/401|403|invalid|api.?key|unauthorized|forbidden/i.test(message)) {
+    return "Cloud AI provider is unavailable because its API key was rejected. I switched to TerminalX fallback mode so you can keep working.";
+  }
+  if (/timed out|timeout|network|fetch/i.test(message)) {
+    return "Cloud AI provider was too slow or unreachable. I switched to TerminalX fallback mode so you can keep working.";
+  }
+  return "Cloud AI provider is unavailable. I switched to TerminalX fallback mode so you can keep working.";
+}
+
 async function answerWithLlm({ message, intent, llmProvider }) {
   if (!llmProvider?.sendMessage) {
     return null;
@@ -143,7 +154,7 @@ async function answerWithLlm({ message, intent, llmProvider }) {
     return [
       answerGeneralQuestion(message),
       "",
-      `AI provider fallback active: ${error.message}`
+      providerFallbackNotice(error)
     ].join("\n");
   }
 }

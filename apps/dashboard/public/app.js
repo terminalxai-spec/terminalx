@@ -21,7 +21,12 @@ let isGenerating = false;
 let stopGeneration = false;
 let pendingAttachmentFile = null;
 let fileSearchTerm = "";
-let conversationPreferences = JSON.parse(localStorage.getItem("terminalx.conversations") || "{}");
+let conversationPreferences = {};
+try {
+  conversationPreferences = JSON.parse(localStorage.getItem("terminalx.conversations") || "{}");
+} catch {
+  conversationPreferences = {};
+}
 
 function can(permission) {
   return currentPermissions.includes(permission);
@@ -599,20 +604,40 @@ function renderActivityFeed() {
 }
 
 async function loadDashboard() {
-  const [health, agents, approvals, tasks, files, actionLog, permissions, database, storage, runtime, chatHistory] =
-    await Promise.all([
-      getJson("/api/health"),
-      getJson("/api/agents"),
-      can("approvals:read") ? getJson("/api/approvals?status=pending") : Promise.resolve({ approvals: [] }),
-      can("tasks:read") ? getJson("/api/tasks") : Promise.resolve({ tasks: [] }),
-      can("files:read") ? getJson("/api/files") : Promise.resolve({ files: [] }),
-      can("settings:manage") ? getJson("/api/action-log") : Promise.resolve({ actions: [] }),
-      getJson("/api/permissions"),
-      getJson("/api/config/database"),
-      getJson("/api/config/storage"),
-      getJson("/api/config/runtime"),
-      can("chat:use") ? getJson("/api/chat/history") : Promise.resolve({ history: [] })
-    ]);
+  const settled = await Promise.allSettled([
+    getJson("/api/health"),
+    getJson("/api/agents"),
+    can("approvals:read") ? getJson("/api/approvals?status=pending") : Promise.resolve({ approvals: [] }),
+    can("tasks:read") ? getJson("/api/tasks") : Promise.resolve({ tasks: [] }),
+    can("files:read") ? getJson("/api/files") : Promise.resolve({ files: [] }),
+    can("settings:manage") ? getJson("/api/action-log") : Promise.resolve({ actions: [] }),
+    getJson("/api/permissions"),
+    getJson("/api/config/database"),
+    getJson("/api/config/storage"),
+    getJson("/api/config/runtime"),
+    can("chat:use") ? getJson("/api/chat/history") : Promise.resolve({ history: [] })
+  ]);
+  const valueAt = (index, fallback) => {
+    if (settled[index].status === "fulfilled") {
+      return settled[index].value;
+    }
+    showToast(settled[index].reason?.message || "Some dashboard data failed to load", "warning");
+    return fallback;
+  };
+  const health = valueAt(0, { ok: false, environment: "unknown", runtimeMode: "unknown" });
+  const agents = valueAt(1, { agents: [] });
+  const approvals = valueAt(2, { approvals: [] });
+  const tasks = valueAt(3, { tasks: [] });
+  const files = valueAt(4, { files: [] });
+  const actionLog = valueAt(5, { actions: [] });
+  const permissions = valueAt(6, { permissionModes: [] });
+  const database = valueAt(7, { database: { provider: "unknown", connected: false, note: "Unavailable" } });
+  const storage = valueAt(8, { storage: { provider: "unknown", bucket: "unknown", mode: "unknown" } });
+  const runtime = valueAt(9, {
+    runtime: { mode: "unknown", networkPolicy: "unknown", llm: { localAiImplemented: false } },
+    llmProvider: { id: "unknown", status: "unavailable", note: "Unavailable" }
+  });
+  const chatHistory = valueAt(10, { history: [] });
 
   const healthDot = document.getElementById("health-dot");
   const healthPill = document.getElementById("health-pill");
@@ -1335,7 +1360,7 @@ document.getElementById("task-drawer-close").addEventListener("click", () => {
   document.getElementById("task-drawer").classList.add("hidden");
 });
 
-for (const target of [document.getElementById("chat-messages"), document.getElementById("chat-drop-zone")]) {
+  for (const target of [document.getElementById("chat-messages"), document.getElementById("chat-drop-zone")].filter(Boolean)) {
   target.addEventListener("dragover", (event) => {
     event.preventDefault();
     document.getElementById("chat-drop-zone").classList.remove("hidden");
@@ -1382,3 +1407,5 @@ window.addEventListener("load", () => {
 
 window.addEventListener("online", () => showToast("Back online", "success"));
 window.addEventListener("offline", () => showToast("Offline mode detected", "warning"));
+window.addEventListener("error", () => showToast("Mobile UI recovered from an interface error.", "warning"));
+window.addEventListener("unhandledrejection", () => showToast("A request failed, but TerminalX is still running.", "warning"));
