@@ -28,6 +28,11 @@ const rolePermissions = {
 };
 
 function seedRbac(repository) {
+  if (typeof repository.seedRolesAndPermissions === "function") {
+    repository.seedRolesAndPermissions(rolePermissions);
+    return;
+  }
+
   for (const [role, rolePermissionList] of Object.entries(rolePermissions)) {
     repository.upsertRole({
       id: role,

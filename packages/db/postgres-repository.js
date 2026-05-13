@@ -185,51 +185,142 @@ class PostgresRepository {
   close() {}
 
   seedAgents(agents) {
-    for (const agent of agents) {
-      this.queryImpl(
-        `insert into agents (id, name, type, status, default_model, responsibilities, metadata, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, now(), now())
-         on conflict(id) do update set
-           name = excluded.name,
-           type = excluded.type,
-           status = excluded.status,
-           default_model = excluded.default_model,
-           responsibilities = excluded.responsibilities,
-           updated_at = now()`,
-        [
-          agent.id,
-          agent.name,
-          agent.type,
-          agent.status,
-          agent.defaultModel,
-          asJson(agent.responsibilities || []),
-          asJson(agent.metadata || {})
-        ]
-      );
+    if (!agents.length) {
+      return;
     }
+
+    const values = [];
+    const placeholders = agents.map((agent, index) => {
+      const offset = index * 7;
+      values.push(
+        agent.id,
+        agent.name,
+        agent.type,
+        agent.status,
+        agent.defaultModel,
+        asJson(agent.responsibilities || []),
+        asJson(agent.metadata || {})
+      );
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}::jsonb, $${offset + 7}::jsonb, now(), now())`;
+    });
+
+    this.queryImpl(
+      `insert into agents (id, name, type, status, default_model, responsibilities, metadata, created_at, updated_at)
+       values ${placeholders.join(", ")}
+       on conflict(id) do update set
+         name = excluded.name,
+         type = excluded.type,
+         status = excluded.status,
+         default_model = excluded.default_model,
+         responsibilities = excluded.responsibilities,
+         updated_at = now()`,
+      values
+    );
   }
 
   seedPermissions(permissionModes) {
-    for (const mode of permissionModes) {
-      this.queryImpl(
-        `insert into permissions (id, label, description, requires_approval, risk_level, policy, created_at, updated_at)
-         values ($1, $2, $3, $4, $5, $6::jsonb, now(), now())
-         on conflict(id) do update set
-           label = excluded.label,
-           description = excluded.description,
-           requires_approval = excluded.requires_approval,
-           risk_level = excluded.risk_level,
-           policy = excluded.policy,
-           updated_at = now()`,
-        [mode.id, mode.label, mode.description, Boolean(mode.requiresApproval), mode.riskLevel || "low", asJson(mode)]
-      );
+    if (!permissionModes.length) {
+      return;
     }
+
+    const values = [];
+    const placeholders = permissionModes.map((mode, index) => {
+      const offset = index * 6;
+      values.push(
+        mode.id,
+        mode.label,
+        mode.description,
+        Boolean(mode.requiresApproval),
+        mode.riskLevel || "low",
+        asJson(mode)
+      );
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}::jsonb, now(), now())`;
+    });
+
+    this.queryImpl(
+      `insert into permissions (id, label, description, requires_approval, risk_level, policy, created_at, updated_at)
+       values ${placeholders.join(", ")}
+       on conflict(id) do update set
+         label = excluded.label,
+         description = excluded.description,
+         requires_approval = excluded.requires_approval,
+         risk_level = excluded.risk_level,
+         policy = excluded.policy,
+         updated_at = now()`,
+      values
+    );
   }
 
   seedSettings(settingsPayload = {}) {
-    for (const [key, value] of Object.entries(settingsPayload)) {
-      this.setSetting("system", key, value, false);
+    const entries = Object.entries(settingsPayload);
+    if (!entries.length) {
+      return;
     }
+
+    const values = [];
+    const placeholders = entries.map(([key, value], index) => {
+      const offset = index * 5;
+      values.push(`system_${key}`, "system", key, asJson(value), false);
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}::jsonb, $${offset + 5}, now(), now())`;
+    });
+
+    this.queryImpl(
+      `insert into settings (id, scope, key, value, is_secret, created_at, updated_at)
+       values ${placeholders.join(", ")}
+       on conflict(scope, key) do update set
+         value = excluded.value,
+         is_secret = excluded.is_secret,
+         updated_at = now()`,
+      values
+    );
+  }
+
+  seedRolesAndPermissions(rolePermissionMap = {}) {
+    const roles = Object.keys(rolePermissionMap);
+    if (!roles.length) {
+      return;
+    }
+
+    const roleValues = [];
+    const rolePlaceholders = roles.map((role, index) => {
+      const offset = index * 3;
+      roleValues.push(role, role[0].toUpperCase() + role.slice(1), `${role} role`);
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, now(), now())`;
+    });
+    this.queryImpl(
+      `insert into roles (id, label, description, created_at, updated_at)
+       values ${rolePlaceholders.join(", ")}
+       on conflict(id) do update set
+         label = excluded.label,
+         description = excluded.description,
+         updated_at = now()`,
+      roleValues
+    );
+
+    this.queryImpl("delete from role_permissions where role_id = any($1::text[])", [roles]);
+
+    const permissionRows = [];
+    for (const [role, permissions] of Object.entries(rolePermissionMap)) {
+      for (const permission of permissions) {
+        permissionRows.push([role, permission]);
+      }
+    }
+    if (!permissionRows.length) {
+      return;
+    }
+
+    const permissionValues = [];
+    const permissionPlaceholders = permissionRows.map(([role, permission], index) => {
+      const offset = index * 2;
+      permissionValues.push(role, permission);
+      return `($${offset + 1}, $${offset + 2}, now())`;
+    });
+    this.queryImpl(
+      `insert into role_permissions (role_id, permission_name, created_at)
+       values ${permissionPlaceholders.join(", ")}
+       on conflict(role_id, permission_name) do nothing`,
+      permissionValues
+    );
   }
 
   createUser({ id = crypto.randomUUID(), email, passwordHash, displayName = "", role = "operator" }) {

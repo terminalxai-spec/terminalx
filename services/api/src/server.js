@@ -46,7 +46,7 @@ database.seedSettings({
   database_provider: database.config.provider,
   storage_provider: process.env.FILE_STORAGE_PROVIDER || process.env.STORAGE_PROVIDER || "local"
 });
-if ((process.env.TERMINALX_ENV || "development") !== "production") {
+if ((process.env.TERMINALX_ENV || "development") !== "production" || (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD)) {
   const adminUser = database.upsertUser({
     email: process.env.ADMIN_EMAIL || "admin@terminalx.local",
     passwordHash: hashPassword(process.env.ADMIN_PASSWORD || "change-me-now"),
