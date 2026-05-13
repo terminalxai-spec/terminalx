@@ -6,6 +6,10 @@ function hasValue(value) {
   return Boolean(String(value || "").trim());
 }
 
+function envValue(value) {
+  return String(value || "").trim();
+}
+
 function compactText(value, limit = 4000) {
   const text = String(value || "").trim();
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
@@ -191,7 +195,7 @@ class OpenAiProvider extends BaseLlmProvider {
     super(config);
     this.id = "openai";
     this.model = process.env.OPENAI_MODEL || process.env.CLOUD_LLM_MODEL || "gpt-5-mini";
-    this.apiKey = process.env.OPENAI_API_KEY;
+    this.apiKey = envValue(process.env.OPENAI_API_KEY);
   }
 
   describe() {
@@ -243,7 +247,7 @@ class AnthropicProvider extends BaseLlmProvider {
     super(config);
     this.id = "anthropic";
     this.model = process.env.ANTHROPIC_MODEL || process.env.CLOUD_LLM_MODEL || "claude-sonnet-4-5";
-    this.apiKey = process.env.ANTHROPIC_API_KEY;
+    this.apiKey = envValue(process.env.ANTHROPIC_API_KEY);
   }
 
   describe() {
@@ -296,7 +300,7 @@ class GeminiProvider extends BaseLlmProvider {
     super(config);
     this.id = "gemini";
     this.model = process.env.GEMINI_MODEL || process.env.CLOUD_LLM_MODEL || "gemini-2.0-flash";
-    this.apiKey = process.env.GEMINI_API_KEY;
+    this.apiKey = envValue(process.env.GEMINI_API_KEY);
   }
 
   describe() {
@@ -354,7 +358,7 @@ class GroqProvider extends BaseLlmProvider {
     super(config);
     this.id = "groq";
     this.model = process.env.GROQ_MODEL || process.env.CLOUD_LLM_MODEL || "llama-3.3-70b-versatile";
-    this.apiKey = process.env.GROQ_API_KEY;
+    this.apiKey = envValue(process.env.GROQ_API_KEY);
   }
 
   describe() {
