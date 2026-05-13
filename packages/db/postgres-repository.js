@@ -340,7 +340,9 @@ class PostgresRepository {
     this.queryImpl("delete from role_permissions where role_id = $1", [roleId]);
     for (const permission of permissions) {
       this.queryImpl(
-        "insert into role_permissions (role_id, permission_name, created_at) values ($1, $2, now())",
+        `insert into role_permissions (role_id, permission_name, created_at)
+         values ($1, $2, now())
+         on conflict(role_id, permission_name) do nothing`,
         [roleId, permission]
       );
     }
