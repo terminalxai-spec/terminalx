@@ -38,14 +38,21 @@ const port = Number(process.env.TERMINALX_PORT || 8787);
 const publicRoot = path.resolve(__dirname, "../../../apps/dashboard/public");
 
 const database = createDatabaseRepository();
-database.seedAgents(agentRegistry);
-database.seedPermissions(permissionModes);
-seedRbac(database);
-database.seedSettings({
-  runtime_mode: process.env.TERMINALX_RUNTIME_MODE || "ONLINE_MODE",
-  database_provider: database.config.provider,
-  storage_provider: process.env.FILE_STORAGE_PROVIDER || process.env.STORAGE_PROVIDER || "local"
-});
+const shouldSeedCatalog =
+  process.env.TERMINALX_AUTO_SEED === "true" ||
+  (!process.env.VERCEL && process.env.TERMINALX_AUTO_SEED !== "false");
+
+if (shouldSeedCatalog) {
+  database.seedAgents(agentRegistry);
+  database.seedPermissions(permissionModes);
+  seedRbac(database);
+  database.seedSettings({
+    runtime_mode: process.env.TERMINALX_RUNTIME_MODE || "ONLINE_MODE",
+    database_provider: database.config.provider,
+    storage_provider: process.env.FILE_STORAGE_PROVIDER || process.env.STORAGE_PROVIDER || "local"
+  });
+}
+
 if ((process.env.TERMINALX_ENV || "development") !== "production" || (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD)) {
   const adminUser = database.upsertUser({
     email: process.env.ADMIN_EMAIL || "admin@terminalx.local",
