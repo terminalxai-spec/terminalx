@@ -25,9 +25,24 @@ async function getJson(path) {
     showLogin();
   }
   if (!response.ok) {
-    throw new Error(`Request failed: ${path}`);
+    const message = await readErrorMessage(response, `Request failed: ${path}`);
+    throw new Error(message);
   }
   return response.json();
+}
+
+async function readErrorMessage(response, fallback) {
+  try {
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const payload = await response.json();
+      return payload.message || payload.error || fallback;
+    }
+    const text = await response.text();
+    return text ? text.slice(0, 500) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function showLogin(message = "") {
@@ -659,7 +674,8 @@ async function sendChatRequest(overrides = {}) {
   }
   if (!response.ok) {
     setChatStatus("error");
-    renderChatError("The Chat Agent could not complete this request.");
+    const message = await readErrorMessage(response, "The Chat Agent could not complete this request.");
+    renderChatError(message);
     return;
   }
 

@@ -121,19 +121,27 @@ async function answerWithLlm({ message, intent, llmProvider }) {
     return null;
   }
 
-  const result = await llmProvider.sendMessage({
-    system: [
-      "You are TerminalX Chat Agent inside a multi-agent operating system.",
-      "Answer clearly and practically.",
-      "If the user asks for work to be done, suggest how the CEO Agent should route it.",
-      "Do not claim that files were modified unless a tool result says so."
-    ].join(" "),
-    message: [`Intent: ${intent}`, `User: ${message}`].join("\n"),
-    temperature: 0.3,
-    maxTokens: 900
-  });
+  try {
+    const result = await llmProvider.sendMessage({
+      system: [
+        "You are TerminalX Chat Agent inside a multi-agent operating system.",
+        "Answer clearly and practically.",
+        "If the user asks for work to be done, suggest how the CEO Agent should route it.",
+        "Do not claim that files were modified unless a tool result says so."
+      ].join(" "),
+      message: [`Intent: ${intent}`, `User: ${message}`].join("\n"),
+      temperature: 0.3,
+      maxTokens: 900
+    });
 
-  return result.text;
+    return result.text;
+  } catch (error) {
+    return [
+      answerGeneralQuestion(message),
+      "",
+      `AI provider fallback active: ${error.message}`
+    ].join("\n");
+  }
 }
 
 function createChatAgent({ conversations, conversationRepository = null, storageService, findTask, llmProvider = null }) {
