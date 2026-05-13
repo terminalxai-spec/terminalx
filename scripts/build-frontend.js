@@ -54,6 +54,17 @@ assert.match(indexHtml, /id="chat-summarize-file-button"/, "Chat page must summa
 assert.match(indexHtml, /id="chat-explain-task-button"/, "Chat page must explain selected tasks");
 assert.match(indexHtml, /id="chat-create-task-button"/, "Chat page must support CEO task suggestions");
 assert.match(indexHtml, /id="chat-typing-indicator"/, "Chat page must include a typing indicator");
+assert.match(indexHtml, /id="chat-stop-button"/, "Chat page must include a stop generation button");
+assert.match(indexHtml, /id="new-chat-button"/, "Chat page must support new conversations");
+assert.match(indexHtml, /id="rename-chat-button"/, "Chat page must support renaming conversations");
+assert.match(indexHtml, /id="delete-chat-button"/, "Chat page must support deleting conversations");
+assert.match(indexHtml, /id="chat-drop-zone"/, "Chat page must include drag/drop upload UI");
+assert.match(indexHtml, /id="attachment-preview"/, "Chat page must preview attachments");
+assert.match(indexHtml, /id="activity-feed"/, "Dashboard must include live activity feed");
+assert.match(indexHtml, /id="toast-region"/, "Dashboard must include toast notifications");
+assert.match(indexHtml, /id="task-drawer"/, "Tasks page must include a task detail drawer");
+assert.match(indexHtml, /id="file-search-input"/, "Files page must include search");
+assert.match(indexHtml, /id="splash-screen"/, "PWA must include a branded loading splash");
 
 const manifest = JSON.parse(fs.readFileSync(path.join(publicRoot, "manifest.webmanifest"), "utf8"));
 assert.equal(manifest.name, "TerminalX Agent OS");
@@ -74,9 +85,27 @@ assert.match(appJs, /agents:execute/, "Dashboard must gate CEO task suggestions 
 assert.match(appJs, /\/api\/chat\/history/, "Dashboard must load chat history");
 assert.match(appJs, /\/api\/chat/, "Dashboard must send chat messages");
 assert.match(appJs, /message-bubble/, "Dashboard must render chat bubbles");
+assert.match(appJs, /renderMarkdown/, "Dashboard must render markdown");
+assert.match(appJs, /data-copy-message/, "Assistant messages must expose copy controls");
+assert.match(appJs, /data-regenerate-message/, "Assistant messages must expose regenerate controls");
+assert.match(appJs, /streamAssistantMessage/, "Dashboard must provide progressive streaming UI");
+assert.match(appJs, /stopGeneration/, "Dashboard must support stopping generation");
+assert.match(appJs, /dragover/, "Dashboard must support drag/drop uploads");
+assert.match(appJs, /showToast/, "Dashboard must show toast notifications");
+assert.match(appJs, /renderActivityFeed/, "Dashboard must render agent activity");
+assert.match(appJs, /renderTaskDrawer/, "Dashboard must render task details");
+assert.match(appJs, /conversationPreferences/, "Dashboard must support conversation sidebar state");
 assert.match(appJs, /renderChatSelectors/, "Dashboard must populate chat file and task selectors");
 assert.match(appJs, /summarizeSelectedFile/, "Dashboard must summarize selected files");
 assert.match(appJs, /explainSelectedTask/, "Dashboard must explain selected tasks");
 assert.match(appJs, /renderChatError/, "Dashboard must render chat errors");
+
+const styles = fs.readFileSync(path.join(publicRoot, "styles.css"), "utf8");
+assert.match(styles, /@media \(max-width: 760px\)/, "Dashboard must include mobile responsive styles");
+assert.match(styles, /sidebar-collapsed/, "Sidebar must support collapsed state");
+assert.match(styles, /task-drawer/, "Tasks must include drawer styling");
+assert.match(styles, /toast-region/, "Toasts must include styling");
+assert.match(styles, /chat-drop-zone/, "Drag/drop upload must include styling");
+assert.match(styles, /markdown-body/, "Markdown content must include styling");
 
 console.log("Frontend build validation passed.");

@@ -15,6 +15,13 @@ let lastChatTaskSuggestion = null;
 let lastCreatedTaskId = null;
 let dashboardFiles = [];
 let dashboardTasks = [];
+let dashboardApprovals = [];
+let dashboardActionLog = [];
+let isGenerating = false;
+let stopGeneration = false;
+let pendingAttachmentFile = null;
+let fileSearchTerm = "";
+let conversationPreferences = JSON.parse(localStorage.getItem("terminalx.conversations") || "{}");
 
 function can(permission) {
   return currentPermissions.includes(permission);
@@ -60,6 +67,10 @@ function showApp(user) {
   document.getElementById("current-user").textContent = user?.email || "";
   currentPermissions = user?.permissions || [];
   applyPermissions();
+}
+
+function toggleSidebar() {
+  document.getElementById("app-shell").classList.toggle("sidebar-collapsed");
 }
 
 async function checkSession() {
@@ -117,6 +128,85 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function formatTime(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function saveConversationPreferences() {
+  localStorage.setItem("terminalx.conversations", JSON.stringify(conversationPreferences));
+}
+
+function renderMarkdown(value) {
+  const codeBlocks = [];
+  let text = String(value || "").replace(/```(\w+)?\n([\s\S]*?)```/g, (_, language, code) => {
+    const index = codeBlocks.length;
+    codeBlocks.push({ language: language || "text", code });
+    return `@@CODE_BLOCK_${index}@@`;
+  });
+
+  text = escapeHtml(text)
+    .replace(/^### (.*)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.*)$/gm, "<h3>$1</h3>")
+    .replace(/^# (.*)$/gm, "<h3>$1</h3>")
+    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/^\s*[-*] (.*)$/gm, "<li>$1</li>")
+    .replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>")
+    .replace(/\n{2,}/g, "</p><p>")
+    .replace(/\n/g, "<br />");
+
+  text = `<p>${text}</p>`.replace(/<p><\/p>/g, "");
+  return text.replace(/@@CODE_BLOCK_(\d+)@@/g, (_, index) => {
+    const block = codeBlocks[Number(index)];
+    return `
+      <div class="code-card">
+        <div class="code-toolbar">
+          <span>${escapeHtml(block.language)}</span>
+          <button class="mini-button" type="button" data-copy-code="${escapeHtml(block.code)}">Copy</button>
+        </div>
+        <pre><code>${escapeHtml(block.code)}</code></pre>
+      </div>
+    `;
+  });
+}
+
+function showToast(message, type = "info") {
+  const region = document.getElementById("toast-region");
+  if (!region) {
+    return;
+  }
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  region.appendChild(toast);
+  window.setTimeout(() => toast.remove(), 4200);
+}
+
+function pushActivity(message, type = "agent") {
+  dashboardActionLog = [
+    {
+      id: `local_${Date.now()}`,
+      action: message,
+      payload: { type },
+      createdAt: new Date().toISOString()
+    },
+    ...dashboardActionLog
+  ].slice(0, 30);
+  renderActivityFeed();
 }
 
 function pill(label, extraClass = "") {
@@ -207,6 +297,10 @@ function normalizeConversations(history) {
 }
 
 function conversationTitle(conversation) {
+  const customTitle = conversationPreferences[conversation.id]?.title;
+  if (customTitle) {
+    return customTitle;
+  }
   const firstUserMessage = conversation.messages?.find((message) => message.role === "user");
   return firstUserMessage?.content?.slice(0, 54) || conversation.id || "New conversation";
 }
@@ -229,6 +323,7 @@ function renderConversationList() {
     return;
   }
   element.innerHTML = chatConversations
+    .filter((conversation) => !conversationPreferences[conversation.id]?.deleted)
     .map(
       (conversation) => `
         <button
@@ -237,7 +332,7 @@ function renderConversationList() {
           data-conversation-id="${escapeHtml(conversation.id)}"
         >
           ${escapeHtml(conversationTitle(conversation))}
-          <span>${escapeHtml(conversation.messages?.length || 0)} messages</span>
+          <span>${escapeHtml(conversation.messages?.length || 0)} messages - ${escapeHtml(formatTime(conversation.updatedAt || conversation.createdAt))}</span>
         </button>
       `
     )
@@ -255,26 +350,89 @@ function renderChatMessages(conversation) {
   }
   if (!conversation?.messages?.length) {
     element.innerHTML = `
-      <div class="chat-state empty-state">
-        <strong>Start a new chat</strong>
-        <span>Ask a question, select a file to summarize, or select a task to explain.</span>
+      <div class="chat-state empty-state premium-empty-state">
+        <strong>What should TerminalX do next?</strong>
+        <span>Start with an operational prompt or turn a conversation into a task.</span>
+        <div class="suggestion-grid">
+          <button type="button" data-example-prompt="Create simple calculator">Create simple calculator</button>
+          <button type="button" data-example-prompt="Summarize my latest uploaded file">Summarize uploaded file</button>
+          <button type="button" data-example-prompt="Plan a content calendar for TerminalX">Plan content calendar</button>
+          <button type="button" data-example-prompt="Analyze BTC risk with stop loss">Analyze trading risk</button>
+        </div>
       </div>
     `;
     return;
   }
   element.innerHTML = conversation.messages
-    .map(
-      (message) => `
+    .map((message, index) => {
+      const timestamp = formatTime(message.createdAt);
+      return `
         <div class="message-row ${escapeHtml(message.role)}">
           <div class="message-bubble">
-            <span class="message-role">${escapeHtml(message.role)}</span>
-            <div class="preline">${escapeHtml(message.content)}</div>
+            <div class="message-meta">
+              <span class="message-role">${escapeHtml(message.role)}</span>
+              <time>${escapeHtml(timestamp)}</time>
+            </div>
+            <div class="markdown-body">${renderMarkdown(message.content)}</div>
+            ${
+              message.role === "assistant"
+                ? `<div class="message-actions">
+                    <button class="mini-button" type="button" data-copy-message="${index}">Copy</button>
+                    <button class="mini-button" type="button" data-regenerate-message="${index}">Regenerate</button>
+                  </div>`
+                : ""
+            }
           </div>
         </div>
-      `
-    )
+      `;
+    })
     .join("");
   element.scrollTop = element.scrollHeight;
+}
+
+function appendLocalMessage(role, content, metadata = {}) {
+  const id = activeConversationId || `local_chat_${Date.now()}`;
+  activeConversationId = id;
+  let conversation = chatConversations.find((item) => item.id === id);
+  if (!conversation) {
+    conversation = {
+      id,
+      agentId: "chat-agent",
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    chatConversations.push(conversation);
+  }
+  conversation.messages.push({
+    id: `local_msg_${Date.now()}_${conversation.messages.length}`,
+    role,
+    content,
+    metadata,
+    createdAt: new Date().toISOString()
+  });
+  conversation.updatedAt = new Date().toISOString();
+  renderConversationList();
+  renderChatMessages(conversation);
+  return conversation.messages.at(-1);
+}
+
+async function streamAssistantMessage(fullText) {
+  const conversation = activeConversation();
+  if (!conversation) {
+    return;
+  }
+  const message = appendLocalMessage("assistant", "", { streaming: true });
+  const tokens = String(fullText || "").split(/(\s+)/);
+  for (const token of tokens) {
+    if (stopGeneration) {
+      message.content += "\n\n[Stopped]";
+      break;
+    }
+    message.content += token;
+    renderChatMessages(conversation);
+    await new Promise((resolve) => window.setTimeout(resolve, 12));
+  }
 }
 
 function renderChatPage(history) {
@@ -367,6 +525,7 @@ function latestTaskOutput(task) {
 }
 
 function setChatStatus(message, loading = false) {
+  isGenerating = loading;
   const status = document.getElementById("chat-status");
   if (status) {
     status.textContent = loading ? "thinking" : message;
@@ -379,6 +538,10 @@ function setChatStatus(message, loading = false) {
   if (sendButton) {
     sendButton.disabled = loading || !can("chat:use");
   }
+  const stopButton = document.getElementById("chat-stop-button");
+  if (stopButton) {
+    stopButton.classList.toggle("hidden", !loading);
+  }
   for (const id of ["chat-summarize-file-button", "chat-explain-task-button"]) {
     const element = document.getElementById(id);
     if (element) {
@@ -389,6 +552,50 @@ function setChatStatus(message, loading = false) {
   if (createChatTaskButton) {
     createChatTaskButton.disabled = loading || !can("chat:use") || !can("agents:execute");
   }
+}
+
+function renderActivityFeed() {
+  const element = document.getElementById("activity-feed");
+  if (!element) {
+    return;
+  }
+  const taskEvents = dashboardTasks.slice(0, 8).map((task) => ({
+    label: `${task.assignedAgentId || "Agent"} ${task.status}`,
+    detail: task.title,
+    createdAt: task.updatedAt || task.createdAt,
+    type: task.status
+  }));
+  const approvalEvents = dashboardApprovals.slice(0, 5).map((approval) => ({
+    label: "Approval required",
+    detail: approval.title,
+    createdAt: approval.createdAt,
+    type: "approval"
+  }));
+  const logEvents = dashboardActionLog.slice(0, 8).map((entry) => ({
+    label: entry.action,
+    detail: JSON.stringify(entry.payload || {}).slice(0, 120),
+    createdAt: entry.createdAt,
+    type: entry.payload?.type || "log"
+  }));
+  const events = [...taskEvents, ...approvalEvents, ...logEvents]
+    .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0))
+    .slice(0, 12);
+  element.innerHTML = events.length
+    ? events
+        .map(
+          (event) => `
+            <div class="activity-item ${escapeHtml(event.type)}">
+              <span></span>
+              <div>
+                <strong>${escapeHtml(event.label)}</strong>
+                <p>${escapeHtml(event.detail || "")}</p>
+              </div>
+              <time>${escapeHtml(formatTime(event.createdAt))}</time>
+            </div>
+          `
+        )
+        .join("")
+    : `<div class="item muted">No activity yet.</div>`;
 }
 
 async function loadDashboard() {
@@ -416,6 +623,17 @@ async function loadDashboard() {
   document.getElementById("metric-tasks").textContent = tasks.tasks.length;
   document.getElementById("metric-approvals").textContent = approvals.approvals.length;
   document.getElementById("metric-files").textContent = files.files.length;
+  dashboardTasks = tasks.tasks;
+  dashboardFiles = files.files;
+  dashboardApprovals = approvals.approvals;
+  if (actionLog.actions?.length) {
+    dashboardActionLog = actionLog.actions;
+  }
+  const providerPill = document.getElementById("provider-pill");
+  if (providerPill) {
+    providerPill.textContent = `${runtime.llmProvider.id} - ${runtime.llmProvider.status}`;
+    providerPill.classList.toggle("offline", runtime.llmProvider.status !== "ready" && runtime.llmProvider.status !== "mock");
+  }
   renderChatSelectors(files.files, tasks.tasks);
 
   renderAgents("agent-status-cards", agents.agents);
@@ -463,17 +681,26 @@ async function loadDashboard() {
     "No chat messages yet."
   );
   renderChatPage(chatHistory.history);
+  renderActivityFeed();
 
   renderList(
     "files-list",
-    files.files,
+    files.files.filter((file) => {
+      const haystack = `${file.filename || ""} ${file.path || ""} ${file.provider || ""}`.toLowerCase();
+      return haystack.includes(fileSearchTerm.toLowerCase());
+    }),
     (file) => `
       <strong>${escapeHtml(file.filename || "Untitled file")}</strong>
       <div class="muted">${escapeHtml(file.path || "No path")}</div>
       <div class="muted">${escapeHtml(file.provider)} - ${escapeHtml(file.bucket)} - ${escapeHtml(file.size_bytes)} bytes</div>
       <div class="button-row">
+        ${pill(file.mime_type || "file")}
+        ${pill(file.task_id ? "task-linked" : "unassigned")}
+      </div>
+      <div class="button-row">
         <button data-file-action="read" data-file-id="${escapeHtml(file.id)}" ${can("files:read") ? "" : "disabled"}>Read</button>
         <button data-file-action="download" data-file-id="${escapeHtml(file.id)}" ${can("files:read") ? "" : "disabled"}>Download</button>
+        <button data-file-action="summarize" data-file-id="${escapeHtml(file.id)}" ${can("chat:use") ? "" : "disabled"}>Summarize</button>
         <button class="danger-button" data-file-action="delete" data-file-id="${escapeHtml(file.id)}" ${can("files:delete") ? "" : "disabled"}>Delete</button>
       </div>
     `,
@@ -549,6 +776,15 @@ async function uploadFile(event) {
   }
 
   const taskId = taskInput.value.trim();
+  const payload = await uploadFileObject(file, taskId);
+  result.textContent = `Uploaded ${payload.file.filename} to ${payload.file.path}`;
+  input.value = "";
+  showToast(`Uploaded ${payload.file.filename}`, "success");
+  pushActivity(`File uploaded: ${payload.file.filename}`, "file");
+  await loadDashboard();
+}
+
+async function uploadFileObject(file, taskId = "") {
   const content = arrayBufferToBase64(await file.arrayBuffer());
   const response = await fetch("/api/files/upload", {
     method: "POST",
@@ -564,12 +800,13 @@ async function uploadFile(event) {
   });
   if (response.status === 401) {
     showLogin("Login required.");
-    return;
+    throw new Error("Login required.");
   }
   const payload = await response.json();
-  result.textContent = `Uploaded ${payload.file.filename} to ${payload.file.path}`;
-  input.value = "";
-  await loadDashboard();
+  if (!response.ok) {
+    throw new Error(payload.message || payload.error || "File upload failed.");
+  }
+  return payload;
 }
 
 async function handleFileAction(event) {
@@ -593,6 +830,18 @@ async function handleFileAction(event) {
     return;
   }
 
+  if (action === "summarize") {
+    location.hash = "#chat";
+    showPage("chat");
+    const file = dashboardFiles.find((item) => item.id === fileId);
+    await sendChatRequest({
+      message: `Summarize file ${file?.filename || fileId}`,
+      file_id: fileId,
+      task_id: null
+    });
+    return;
+  }
+
   if (action === "delete") {
     const response = await fetch(`/api/files/${fileId}`, { method: "DELETE" });
     const payload = await response.json();
@@ -600,6 +849,7 @@ async function handleFileAction(event) {
       payload.status === "approval_required"
         ? `Delete requires approval: ${payload.approval_id}`
         : `Deleted ${payload.file.filename}`;
+    showToast(payload.status === "approval_required" ? "Approval required for delete" : "File deleted", "info");
     await loadDashboard();
   }
 }
@@ -622,6 +872,8 @@ async function createDemoTask() {
     return;
   }
 
+  showToast("Demo task created", "success");
+  pushActivity("CEO Agent created demo task", "task");
   await loadDashboard();
 }
 
@@ -652,6 +904,8 @@ async function sendCommand(event) {
   const payload = await response.json();
   result.textContent = `${payload.selected_agent.name} -> ${payload.status}. ${payload.response}`;
   input.value = "";
+  showToast(payload.approval_required ? "Approval required" : "Task routed", payload.approval_required ? "warning" : "success");
+  pushActivity(`CEO Agent ${payload.status}: ${payload.selected_agent.name}`, "agent");
   await loadDashboard();
 }
 
@@ -661,7 +915,7 @@ async function sendChatMessage(event) {
 }
 
 async function sendChatRequest(overrides = {}) {
-  if (!can("chat:use")) {
+  if (!can("chat:use") || isGenerating) {
     setChatStatus("blocked");
     return;
   }
@@ -673,19 +927,41 @@ async function sendChatRequest(overrides = {}) {
   const fileId = String(overrides.file_id ?? fileSelector.value).trim();
   const taskId = String(overrides.task_id ?? taskSelector.value).trim();
 
-  if (!message) {
+  if (!message && !pendingAttachmentFile) {
     setChatStatus("ready");
     return;
   }
 
+  let attachedFileId = fileId || null;
+  if (pendingAttachmentFile) {
+    try {
+      const upload = await uploadFileObject(pendingAttachmentFile);
+      attachedFileId = upload.file.id;
+      showToast(`Attached ${upload.file.filename}`, "success");
+      pushActivity(`Chat Agent attached file ${upload.file.filename}`, "file");
+    } catch (error) {
+      showToast(error.message, "error");
+      setChatStatus("error");
+      return;
+    }
+  }
+
+  const outgoingMessage = message || `Summarize attached file ${pendingAttachmentFile?.name || ""}`;
+  appendLocalMessage("user", outgoingMessage, {
+    file_id: attachedFileId,
+    task_id: taskId || null
+  });
+  pendingAttachmentFile = null;
+  renderAttachmentPreview();
+  stopGeneration = false;
   setChatStatus("thinking", true);
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      message,
+      message: outgoingMessage,
       conversation_id: activeConversationId,
-      file_id: fileId || null,
+      file_id: attachedFileId,
       task_id: taskId || null
     })
   });
@@ -702,6 +978,7 @@ async function sendChatRequest(overrides = {}) {
     setChatStatus("error");
     const message = await readErrorMessage(response, "The Chat Agent could not complete this request.");
     renderChatError(message);
+    showToast("Chat failed", "error");
     return;
   }
 
@@ -709,9 +986,11 @@ async function sendChatRequest(overrides = {}) {
   activeConversationId = payload.conversation_id;
   lastChatTaskSuggestion = payload.task_suggestions?.[0] || {
     title: "Chat follow-up",
-    command: message
+    command: outgoingMessage
   };
   input.value = "";
+  await streamAssistantMessage(payload.response);
+  pushActivity(`Chat Agent responded: ${payload.intent}`, "chat");
   setChatStatus("ready");
   await loadDashboard();
 }
@@ -795,6 +1074,8 @@ async function createTaskFromChat() {
   }
   setChatStatus("task created");
   input.value = "";
+  showToast("Task created and assigned", "success");
+  pushActivity(`CEO Agent created task ${payload.task_id}`, "task");
   await loadDashboard();
   renderChatTaskResult(payload);
 }
@@ -811,6 +1092,123 @@ function openTask(taskId = lastCreatedTaskId) {
     element?.classList.add("active-task");
     window.setTimeout(() => element?.classList.remove("active-task"), 1400);
   }, 80);
+}
+
+function renderAttachmentPreview() {
+  const element = document.getElementById("attachment-preview");
+  if (!element) {
+    return;
+  }
+  if (!pendingAttachmentFile) {
+    element.classList.add("hidden");
+    element.innerHTML = "";
+    return;
+  }
+  element.classList.remove("hidden");
+  element.innerHTML = `
+    <div>
+      <strong>${escapeHtml(pendingAttachmentFile.name)}</strong>
+      <span>${escapeHtml(Math.ceil(pendingAttachmentFile.size / 1024))} KB ready to upload</span>
+    </div>
+    <button class="mini-button" type="button" data-clear-attachment>Remove</button>
+  `;
+}
+
+function startNewChat() {
+  activeConversationId = null;
+  lastChatTaskSuggestion = null;
+  renderConversationList();
+  renderChatMessages(null);
+  document.getElementById("chat-input").focus();
+}
+
+function renameActiveChat() {
+  if (!activeConversationId) {
+    return;
+  }
+  const currentTitle = conversationTitle(activeConversation());
+  const title = window.prompt("Rename conversation", currentTitle);
+  if (!title) {
+    return;
+  }
+  conversationPreferences[activeConversationId] = {
+    ...(conversationPreferences[activeConversationId] || {}),
+    title: title.trim()
+  };
+  saveConversationPreferences();
+  renderConversationList();
+  showToast("Conversation renamed", "success");
+}
+
+function deleteActiveChat() {
+  if (!activeConversationId) {
+    return;
+  }
+  conversationPreferences[activeConversationId] = {
+    ...(conversationPreferences[activeConversationId] || {}),
+    deleted: true
+  };
+  saveConversationPreferences();
+  activeConversationId = null;
+  renderConversationList();
+  renderChatMessages(null);
+  showToast("Conversation hidden on this device", "info");
+}
+
+function copyToClipboard(text) {
+  navigator.clipboard?.writeText(text).then(
+    () => showToast("Copied", "success"),
+    () => showToast("Copy failed", "error")
+  );
+}
+
+async function regenerateAssistantMessage(index) {
+  const conversation = activeConversation();
+  const messages = conversation?.messages || [];
+  const previousUser = messages.slice(0, index).reverse().find((message) => message.role === "user");
+  if (!previousUser) {
+    showToast("No user message to regenerate from", "warning");
+    return;
+  }
+  await sendChatRequest({ message: previousUser.content, file_id: previousUser.metadata?.file_id || null, task_id: previousUser.metadata?.task_id || null });
+}
+
+function renderTaskDrawer(task) {
+  const drawer = document.getElementById("task-drawer");
+  const title = document.getElementById("task-drawer-title");
+  const content = document.getElementById("task-drawer-content");
+  if (!drawer || !task) {
+    return;
+  }
+  title.textContent = task.title;
+  content.innerHTML = `
+    <div class="task-detail-grid">
+      <div>${pill(task.status, task.status)} ${pill(task.assignedAgentId || "unassigned")}</div>
+      <div class="muted">Created ${escapeHtml(formatTime(task.createdAt))}</div>
+      <div class="muted preline">${escapeHtml(task.description || "No description")}</div>
+      <div>
+        <strong>Requirements</strong>
+        <ul>${(task.metadata?.requirements || ["No structured requirements yet."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      </div>
+      <div>
+        <strong>Execution logs</strong>
+        <div class="stack">
+          ${(task.history || [])
+            .map(
+              (event) => `
+                <div class="item">
+                  <strong>${escapeHtml(event.eventType)}</strong>
+                  <div class="muted">${escapeHtml(formatTime(event.createdAt))}</div>
+                  <div class="muted preline">${escapeHtml(JSON.stringify(event.payload, null, 2))}</div>
+                </div>
+              `
+            )
+            .join("") || `<div class="item muted">No execution logs yet.</div>`}
+        </div>
+      </div>
+    </div>
+  `;
+  drawer.classList.remove("hidden");
 }
 
 async function login(event) {
@@ -860,12 +1258,44 @@ async function decideApproval(event) {
 }
 
 window.addEventListener("hashchange", () => showPage(location.hash.slice(1)));
+document.getElementById("sidebar-toggle").addEventListener("click", toggleSidebar);
 document.getElementById("login-form").addEventListener("submit", login);
 document.getElementById("logout-button").addEventListener("click", logout);
 document.getElementById("create-task-button").addEventListener("click", createDemoTask);
 document.getElementById("command-form").addEventListener("submit", sendCommand);
 document.getElementById("chat-form").addEventListener("submit", sendChatMessage);
+document.getElementById("chat-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendChatRequest();
+  }
+});
+document.getElementById("chat-messages").addEventListener("click", (event) => {
+  const copyCode = event.target.closest("[data-copy-code]");
+  if (copyCode) {
+    copyToClipboard(copyCode.dataset.copyCode);
+    return;
+  }
+  const copyMessage = event.target.closest("[data-copy-message]");
+  if (copyMessage) {
+    const message = activeConversation()?.messages?.[Number(copyMessage.dataset.copyMessage)];
+    copyToClipboard(message?.content || "");
+    return;
+  }
+  const regenerate = event.target.closest("[data-regenerate-message]");
+  if (regenerate) {
+    regenerateAssistantMessage(Number(regenerate.dataset.regenerateMessage));
+  }
+  const example = event.target.closest("[data-example-prompt]");
+  if (example) {
+    document.getElementById("chat-input").value = example.dataset.examplePrompt;
+    sendChatRequest();
+  }
+});
 document.getElementById("chat-conversation-list").addEventListener("click", selectConversation);
+document.getElementById("new-chat-button").addEventListener("click", startNewChat);
+document.getElementById("rename-chat-button").addEventListener("click", renameActiveChat);
+document.getElementById("delete-chat-button").addEventListener("click", deleteActiveChat);
 document.getElementById("chat-create-task-button").addEventListener("click", createTaskFromChat);
 document.getElementById("chat-task-result").addEventListener("click", (event) => {
   const button = event.target.closest("[data-open-task]");
@@ -873,12 +1303,56 @@ document.getElementById("chat-task-result").addEventListener("click", (event) =>
     openTask(button.dataset.openTask);
   }
 });
+document.getElementById("attachment-preview").addEventListener("click", (event) => {
+  if (event.target.closest("[data-clear-attachment]")) {
+    pendingAttachmentFile = null;
+    renderAttachmentPreview();
+  }
+});
+document.getElementById("chat-stop-button").addEventListener("click", () => {
+  stopGeneration = true;
+  setChatStatus("stopped");
+});
 document.getElementById("chat-summarize-file-button").addEventListener("click", summarizeSelectedFile);
 document.getElementById("chat-explain-task-button").addEventListener("click", explainSelectedTask);
 document.getElementById("approvals-list").addEventListener("click", decideApproval);
 document.getElementById("home-approvals-list").addEventListener("click", decideApproval);
 document.getElementById("file-upload-form").addEventListener("submit", uploadFile);
 document.getElementById("files-list").addEventListener("click", handleFileAction);
+document.getElementById("file-search-input").addEventListener("input", (event) => {
+  fileSearchTerm = event.target.value;
+  loadDashboard();
+});
+document.getElementById("tasks-list").addEventListener("click", (event) => {
+  const record = event.target.closest(".task-record");
+  if (!record) {
+    return;
+  }
+  const taskId = record.id.replace(/^task-/, "");
+  renderTaskDrawer(dashboardTasks.find((task) => task.id === taskId));
+});
+document.getElementById("task-drawer-close").addEventListener("click", () => {
+  document.getElementById("task-drawer").classList.add("hidden");
+});
+
+for (const target of [document.getElementById("chat-messages"), document.getElementById("chat-drop-zone")]) {
+  target.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    document.getElementById("chat-drop-zone").classList.remove("hidden");
+  });
+  target.addEventListener("dragleave", () => {
+    document.getElementById("chat-drop-zone").classList.add("hidden");
+  });
+  target.addEventListener("drop", (event) => {
+    event.preventDefault();
+    document.getElementById("chat-drop-zone").classList.add("hidden");
+    pendingAttachmentFile = event.dataTransfer.files[0] || null;
+    renderAttachmentPreview();
+    if (pendingAttachmentFile) {
+      showToast("Attachment ready", "info");
+    }
+  });
+}
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
@@ -901,3 +1375,10 @@ checkSession()
     document.getElementById("health-pill").textContent = "Runtime offline";
     showLogin("Runtime offline.");
   });
+
+window.addEventListener("load", () => {
+  window.setTimeout(() => document.getElementById("splash-screen")?.classList.add("hidden"), 450);
+});
+
+window.addEventListener("online", () => showToast("Back online", "success"));
+window.addEventListener("offline", () => showToast("Offline mode detected", "warning"));

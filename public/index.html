@@ -15,6 +15,12 @@
     <link rel="stylesheet" href="/styles.css?v=terminalx-chat-2" />
   </head>
   <body>
+    <div id="splash-screen" class="splash-screen">
+      <span class="brand-mark pulse-mark">TX</span>
+      <strong>TerminalX</strong>
+      <small>AI operations workspace</small>
+    </div>
+
     <section id="auth-screen" class="auth-screen">
       <form id="login-form" class="login-panel">
         <span class="brand-mark">TX</span>
@@ -32,21 +38,22 @@
     <div id="app-shell" class="app-shell hidden">
       <aside class="sidebar">
         <a class="brand" href="#command-center" aria-label="TerminalX Command Center">
-          <span class="brand-mark">TX</span>
+          <span class="brand-mark pulse-mark">TX</span>
           <span>
             <strong>TerminalX</strong>
             <small>Agent OS</small>
           </span>
         </a>
+        <button id="sidebar-toggle" class="mini-button sidebar-toggle" type="button">Collapse</button>
 
         <nav class="nav" aria-label="Dashboard pages">
-          <a href="#command-center" class="nav-link active" data-page-link="command-center">Command Center</a>
-          <a href="#chat" class="nav-link" data-page-link="chat">Chat</a>
-          <a href="#agents" class="nav-link" data-page-link="agents">Agents</a>
-          <a href="#tasks" class="nav-link" data-page-link="tasks">Tasks</a>
-          <a href="#approvals" class="nav-link" data-page-link="approvals">Approval Queue</a>
-          <a href="#files" class="nav-link" data-page-link="files">Files</a>
-          <a href="#settings" class="nav-link" data-page-link="settings">Settings</a>
+          <a href="#command-center" class="nav-link active" data-page-link="command-center"><span>⌘</span> Command</a>
+          <a href="#chat" class="nav-link" data-page-link="chat"><span>◌</span> Chat</a>
+          <a href="#agents" class="nav-link" data-page-link="agents"><span>✦</span> Agents</a>
+          <a href="#tasks" class="nav-link" data-page-link="tasks"><span>▣</span> Tasks</a>
+          <a href="#approvals" class="nav-link" data-page-link="approvals"><span>✓</span> Approvals</a>
+          <a href="#files" class="nav-link" data-page-link="files"><span>↥</span> Files</a>
+          <a href="#settings" class="nav-link" data-page-link="settings"><span>⚙</span> Settings</a>
         </nav>
 
         <div class="sidebar-status">
@@ -63,6 +70,7 @@
           </div>
           <div class="topbar-actions">
             <span id="current-user" class="muted"></span>
+            <span id="provider-pill" class="provider-pill">AI checking</span>
             <button id="create-task-button" class="secondary-button" type="button">Demo Task</button>
             <button id="logout-button" class="secondary-button" type="button">Logout</button>
           </div>
@@ -135,6 +143,14 @@
               </div>
               <div id="chat-history-list" class="stack"></div>
             </article>
+
+            <article class="panel wide-panel">
+              <div class="panel-heading">
+                <h2>Agent Activity</h2>
+                <span class="panel-kicker">live operations</span>
+              </div>
+              <div id="activity-feed" class="activity-feed"></div>
+            </article>
           </div>
         </section>
 
@@ -143,7 +159,11 @@
             <aside class="chat-rail panel" aria-label="Conversations">
               <div class="panel-heading">
                 <h2>Conversations</h2>
-                <span class="panel-kicker">memory</span>
+                <button id="new-chat-button" class="mini-button" type="button">New</button>
+              </div>
+              <div class="conversation-tools">
+                <button id="rename-chat-button" class="secondary-button" type="button">Rename</button>
+                <button id="delete-chat-button" class="secondary-button" type="button">Delete</button>
               </div>
               <div id="chat-conversation-list" class="chat-conversation-list"></div>
             </aside>
@@ -161,6 +181,7 @@
                 Chat Agent is typing
               </div>
               <div id="chat-task-result" class="chat-task-result hidden"></div>
+              <div id="chat-drop-zone" class="chat-drop-zone hidden">Drop files to attach and upload</div>
               <form id="chat-form" class="chat-composer">
                 <div class="chat-tools">
                   <select id="chat-file-selector" aria-label="Select file">
@@ -173,6 +194,7 @@
                   <button id="chat-explain-task-button" class="secondary-button" type="button">Explain selected task</button>
                   <button id="chat-create-task-button" class="secondary-button" type="button">Create Task from this chat</button>
                 </div>
+                <div id="attachment-preview" class="attachment-preview hidden"></div>
                 <div class="chat-input-row">
                   <textarea
                     id="chat-input"
@@ -181,6 +203,7 @@
                     placeholder="Message TerminalX Chat Agent..."
                   ></textarea>
                   <button id="chat-send-button" type="submit">Send</button>
+                  <button id="chat-stop-button" class="secondary-button hidden" type="button">Stop</button>
                 </div>
               </form>
             </article>
@@ -237,6 +260,7 @@
               <input id="file-task-input" type="text" placeholder="Optional task id" />
               <button type="submit">Upload</button>
             </form>
+            <input id="file-search-input" class="file-search-input" type="search" placeholder="Search files..." />
             <div id="file-result" class="command-result">No file action yet.</div>
             <div id="files-list" class="stack"></div>
           </div>
@@ -262,6 +286,18 @@
         </section>
       </main>
     </div>
+
+    <aside id="task-drawer" class="task-drawer hidden" aria-label="Task details">
+      <div class="task-drawer-panel">
+        <div class="panel-heading">
+          <h2 id="task-drawer-title">Task</h2>
+          <button id="task-drawer-close" class="secondary-button" type="button">Close</button>
+        </div>
+        <div id="task-drawer-content" class="task-drawer-content"></div>
+      </div>
+    </aside>
+
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
 
     <script src="/app.js?v=terminalx-chat-2"></script>
   </body>
