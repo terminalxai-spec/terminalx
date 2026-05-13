@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-const { classifyIntent, evaluateRisk } = require("../services/agent-runtime/src/agents/ceo-agent");
+const { classifyIntent, evaluateRisk, handleCommandWithAi } = require("../services/agent-runtime/src/agents/ceo-agent");
 const { createChatAgent } = require("../services/agent-runtime/src/agents/chat-agent");
 const { TASK_STATUSES, createAgentOrchestrator } = require("../services/agent-runtime/src/agents/orchestrator");
 const { getRuntimeConfig, normalizeRuntimeMode } = require("../services/agent-runtime/src/config/runtime");
@@ -53,6 +53,36 @@ function testRiskPolicy() {
 
   const destructive = evaluateCommandPermission("rm -rf ./storage");
   assert.equal(destructive.decision, "require_approval");
+}
+
+async function testCeoCreatesCodingBuildTask() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const result = await handleCommandWithAi({
+    command: "create simple calculator",
+    createTask: (payload) => repository.createTask(payload),
+    approvalQueue,
+    llmProvider: {
+      async classifyIntent() {
+        return { intent: "coding", provider: "test" };
+      }
+    }
+  });
+
+  const task = repository.findTask(result.task_id);
+  assert.equal(result.status, "created");
+  assert.equal(result.selected_agent.type, "coding");
+  assert.equal(result.response, "Task created and assigned to Coding Agent.");
+  assert.equal(task.title, "Build Simple Calculator");
+  assert.equal(task.assignedAgentId, "coding-agent");
+  assert.equal(task.status, "created");
+  assert.deepEqual(task.metadata.requirements, [
+    "CLI calculator",
+    "add/subtract/multiply/divide",
+    "input validation",
+    "tests"
+  ]);
+  repository.close();
 }
 
 function testRuntimeModes() {
@@ -665,6 +695,7 @@ async function main() {
   testAgentRegistry();
   testCommandRouting();
   testRiskPolicy();
+  await testCeoCreatesCodingBuildTask();
   testRuntimeModes();
   testDatabaseRepository();
   testPostgresRepositoryInterface();

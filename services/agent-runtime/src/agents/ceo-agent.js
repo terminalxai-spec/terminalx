@@ -15,7 +15,7 @@ const intentRules = [
   {
     intent: "coding",
     agentType: "coding",
-    keywords: ["code", "build", "implement", "fix", "refactor", "api", "backend", "frontend", "database", "component"]
+    keywords: ["code", "build", "create", "make", "implement", "fix", "refactor", "api", "app", "calculator", "backend", "frontend", "database", "component"]
   },
   {
     intent: "content",
@@ -135,13 +135,83 @@ function evaluateRisk(command, selectedAgent) {
 }
 
 function buildTaskPayload(command, classification, risk) {
+  const codingBuildTask = buildCodingBuildTask(command, classification);
+  const metadata = {
+    ...(codingBuildTask?.metadata || {})
+  };
+
   return {
-    title: `${classification.agent.name}: ${command.slice(0, 80)}`,
-    description: command,
+    title: codingBuildTask?.title || `${classification.agent.name}: ${command.slice(0, 80)}`,
+    description: codingBuildTask?.description || command,
+    status: codingBuildTask?.status,
     assignedAgentId: classification.agent.id,
     intent: classification.intent,
     approvalRequired: risk.approvalRequired,
-    riskLevel: risk.riskLevel
+    riskLevel: risk.riskLevel,
+    metadata
+  };
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .replace(/[^\w\s-]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word[0]?.toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function isCodingBuildRequest(command, classification) {
+  if (classification.intent !== "coding" || classification.agent.type !== "coding") {
+    return false;
+  }
+  return /\b(build|create|make|implement)\b/i.test(command);
+}
+
+function buildRequirements(command) {
+  if (/\bcalculator\b/i.test(command)) {
+    return [
+      "CLI calculator",
+      "add/subtract/multiply/divide",
+      "input validation",
+      "tests"
+    ];
+  }
+
+  return [
+    "Clarify target runtime and user workflow",
+    "Create a minimal working implementation",
+    "Add input validation and error handling",
+    "Add or update focused tests"
+  ];
+}
+
+function buildCodingTitle(command) {
+  const normalized = String(command || "")
+    .replace(/\b(please|can you|could you|i want|to)\b/gi, " ")
+    .replace(/\b(build|create|make|implement)\b/gi, " ")
+    .replace(/\b(basic|new|a|an|the|for me)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `Build ${titleCase(normalized || "Coding Task")}`;
+}
+
+function buildCodingBuildTask(command, classification) {
+  if (!isCodingBuildRequest(command, classification)) {
+    return null;
+  }
+
+  const requirements = buildRequirements(command);
+  return {
+    title: buildCodingTitle(command),
+    status: "created",
+    description: [`User request: ${command}`, "Requirements:", ...requirements.map((item) => `- ${item}`)].join("\n"),
+    metadata: {
+      requirements,
+      task_kind: "coding_build",
+      next_agent_action: "Coding Agent can inspect requirements and propose file changes. File writes still require approval."
+    }
   };
 }
 
@@ -215,9 +285,23 @@ async function handleCommandWithAi({ command, createTask, approvalQueue, llmProv
   const task = createTask({
     ...buildTaskPayload(trimmedCommand, classification, risk),
     metadata: {
+      ...buildTaskPayload(trimmedCommand, classification, risk).metadata,
       classifier: classification.classifier
     }
   });
+
+  if (isCodingBuildRequest(trimmedCommand, classification) && !risk.approvalRequired) {
+    return {
+      selected_agent: classification.agent,
+      task_id: task.id,
+      status: "created",
+      response: "Task created and assigned to Coding Agent.",
+      approval_required: false,
+      task,
+      requirements: task.metadata?.requirements || [],
+      classifier: classification.classifier
+    };
+  }
 
   if (risk.approvalRequired) {
     const approval = createApprovalForTask({

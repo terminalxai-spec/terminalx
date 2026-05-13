@@ -376,6 +376,15 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.task-record {
+  display: block;
+}
+
+.active-task {
+  outline: 2px solid var(--cyan);
+  outline-offset: 4px;
+}
+
 .agent-card {
   display: grid;
   gap: 10px;
@@ -595,6 +604,29 @@ h2 {
   padding: 13px;
   color: var(--muted);
   background: rgba(2, 7, 18, 0.56);
+}
+
+.chat-task-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(84, 230, 255, 0.1);
+  color: var(--text);
+}
+
+.chat-task-result strong,
+.chat-task-result span {
+  display: block;
+}
+
+.chat-task-result span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .chat-state {
@@ -833,8 +865,14 @@ h2 {
   }
 
   .chat-tools button,
-  .chat-input-row button {
+  .chat-input-row button,
+  .chat-task-result button {
     width: 100%;
+  }
+
+  .chat-task-result {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .chat-input-row textarea {

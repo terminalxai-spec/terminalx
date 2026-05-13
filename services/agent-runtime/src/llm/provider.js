@@ -166,7 +166,7 @@ class MockLlmProvider extends BaseLlmProvider {
     const rules = [
       { intent: "trading", keywords: ["trade", "trading", "stock", "crypto", "forex", "buy", "sell", "portfolio", "market", "btc", "eth"] },
       { intent: "testing", keywords: ["test", "tests", "qa", "verify", "validate", "regression", "coverage", "bug"] },
-      { intent: "coding", keywords: ["code", "build", "implement", "fix", "refactor", "api", "backend", "frontend", "database", "component"] },
+      { intent: "coding", keywords: ["code", "build", "create", "make", "implement", "fix", "refactor", "api", "app", "calculator", "backend", "frontend", "database", "component"] },
       { intent: "content", keywords: ["write", "draft", "blog", "post", "copy", "docs", "readme", "article", "content", "tweet", "caption", "script", "ideas"] }
     ];
     const match = rules.find((rule) => rule.keywords.some((keyword) => normalized.includes(keyword)));

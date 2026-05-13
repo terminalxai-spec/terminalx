@@ -12,6 +12,7 @@ let currentPermissions = [];
 let chatConversations = [];
 let activeConversationId = null;
 let lastChatTaskSuggestion = null;
+let lastCreatedTaskId = null;
 let dashboardFiles = [];
 let dashboardTasks = [];
 
@@ -333,6 +334,28 @@ function renderChatError(message) {
   `;
 }
 
+function renderChatTaskResult(payload) {
+  const element = document.getElementById("chat-task-result");
+  if (!element) {
+    return;
+  }
+  if (!payload?.task_id) {
+    element.classList.add("hidden");
+    element.innerHTML = "";
+    return;
+  }
+  lastCreatedTaskId = payload.task_id;
+  const agentName = payload.selected_agent?.name || "Coding Agent";
+  element.classList.remove("hidden");
+  element.innerHTML = `
+    <div>
+      <strong>Task created and assigned to ${escapeHtml(agentName)}</strong>
+      <span>${escapeHtml(payload.task?.title || payload.response || payload.task_id)}</span>
+    </div>
+    <button class="secondary-button" type="button" data-open-task="${escapeHtml(payload.task_id)}">Open Task</button>
+  `;
+}
+
 function latestTaskOutput(task) {
   const event = task.history?.find((item) => ["agent.result", "agent.failed", "test.run"].includes(item.eventType));
   if (!event) {
@@ -413,11 +436,13 @@ async function loadDashboard() {
     "tasks-list",
     tasks.tasks,
     (task) => `
+      <article class="task-record" id="task-${escapeHtml(task.id)}">
       <strong>${escapeHtml(task.title)}</strong>
       <div class="muted">${pill(task.status, task.status)} ${escapeHtml(task.assignedAgentId)}</div>
       <div class="muted">${escapeHtml(task.description || "No description")}</div>
       <div class="muted preline">${escapeHtml(latestTaskOutput(task))}</div>
       <div class="faint muted">Events: ${escapeHtml(task.history?.length || 0)}</div>
+      </article>
     `,
     "No tasks yet."
   );
@@ -762,8 +787,30 @@ async function createTaskFromChat() {
     showLogin("Login required.");
     return;
   }
-  setChatStatus(response.ok ? "sent" : "error");
+  const payload = await response.json();
+  if (!response.ok) {
+    setChatStatus("error");
+    renderChatError(payload.message || payload.error || "CEO Agent could not create the task.");
+    return;
+  }
+  setChatStatus("task created");
+  input.value = "";
   await loadDashboard();
+  renderChatTaskResult(payload);
+}
+
+function openTask(taskId = lastCreatedTaskId) {
+  if (!taskId) {
+    return;
+  }
+  location.hash = "#tasks";
+  showPage("tasks");
+  window.setTimeout(() => {
+    const element = document.getElementById(`task-${CSS.escape(taskId)}`);
+    element?.scrollIntoView({ behavior: "smooth", block: "center" });
+    element?.classList.add("active-task");
+    window.setTimeout(() => element?.classList.remove("active-task"), 1400);
+  }, 80);
 }
 
 async function login(event) {
@@ -820,6 +867,12 @@ document.getElementById("command-form").addEventListener("submit", sendCommand);
 document.getElementById("chat-form").addEventListener("submit", sendChatMessage);
 document.getElementById("chat-conversation-list").addEventListener("click", selectConversation);
 document.getElementById("chat-create-task-button").addEventListener("click", createTaskFromChat);
+document.getElementById("chat-task-result").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-open-task]");
+  if (button) {
+    openTask(button.dataset.openTask);
+  }
+});
 document.getElementById("chat-summarize-file-button").addEventListener("click", summarizeSelectedFile);
 document.getElementById("chat-explain-task-button").addEventListener("click", explainSelectedTask);
 document.getElementById("approvals-list").addEventListener("click", decideApproval);
