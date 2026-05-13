@@ -841,10 +841,17 @@ function createDatabaseRepository(options = {}) {
   }
 
   if (settings.provider === "postgres") {
+    if (!settings.url) {
+      throw new Error("DATABASE_URL is required when DATABASE_PROVIDER=postgres.");
+    }
     return new PostgresRepository({
       databaseUrl: settings.url,
       query: options.query
     });
+  }
+
+  if (process.env.VERCEL || process.env.TERMINALX_ENV === "production") {
+    throw new Error("Production/Vercel deployments require DATABASE_PROVIDER=postgres and DATABASE_URL. SQLite is local-only.");
   }
 
   return createSqliteRepository({
