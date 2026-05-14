@@ -97,6 +97,8 @@ assert.match(appJs, /renderActivityFeed/, "Dashboard must render agent activity"
 assert.match(appJs, /renderTaskDrawer/, "Dashboard must render task details");
 assert.match(appJs, /renderWorkflowStepper/, "Task cards must show workflow steps");
 assert.match(appJs, /Action needed: You must approve file generation/, "Waiting approval tasks must explain the human action");
+assert.match(appJs, /Approval needed from: You \/ Admin/, "Task drawer must say who needs to approve");
+assert.match(appJs, /pending from You \/ Admin/, "Where-is-my-app panel must explain approval ownership");
 assert.match(appJs, /Approval needed from/, "Approval cards must explain who approves");
 assert.match(appJs, /Requested by/, "Approval cards must show the requesting agent");
 assert.match(appJs, /Waiting for your approval on/, "Agent cards must show waiting approval work");

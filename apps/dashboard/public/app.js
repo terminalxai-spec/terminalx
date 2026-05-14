@@ -254,11 +254,34 @@ function agentLabel(agentId = "") {
 }
 
 function taskApproval(task) {
-  return dashboardApprovals.find((approval) => approval.taskId === task.id || approval.task_id === task.id) || null;
+  const taskTitle = String(task.title || "").toLowerCase();
+  return dashboardApprovals.find((approval) => {
+    if (approval.taskId === task.id || approval.task_id === task.id) {
+      return true;
+    }
+    const approvalTitle = String(approval.title || "").toLowerCase();
+    const approvalDescription = String(approval.description || "").toLowerCase();
+    return task.status === "waiting_approval" && taskTitle && (
+      approvalTitle.includes(taskTitle) ||
+      approvalDescription.includes(taskTitle) ||
+      taskTitle.includes(approvalTitle.replace(/^approve coding agent file generation for\s+/i, ""))
+    );
+  }) || null;
 }
 
 function approvalFiles(approval) {
   return approval?.proposedAction?.proposedFiles || approval?.proposedAction?.files || [];
+}
+
+function plannedFilesFromHistory(task) {
+  for (const event of task.history || []) {
+    const result = event.payload?.result || event.payload || {};
+    const files = result.proposed_files || result.proposedFiles || result.metadata?.proposed_files || [];
+    if (files.length) {
+      return files;
+    }
+  }
+  return [];
 }
 
 function approvalReason(approval) {
@@ -303,8 +326,8 @@ function renderWorkflowStepper(task) {
 
 function nextActionText(task) {
   const approval = taskApproval(task);
-  if (approval) {
-    return "Action needed: You must approve file generation.";
+  if (approval || task.status === "waiting_approval") {
+    return "Action needed: You / Admin must approve file generation in the Approval Queue.";
   }
   if (task.status === "completed") {
     return "Task completed. Review generated files and logs.";
@@ -323,7 +346,11 @@ function nextActionText(task) {
 
 function plannedFiles(task) {
   const approval = taskApproval(task);
-  return approvalFiles(approval).length ? approvalFiles(approval) : task.metadata?.generated_files || [];
+  return approvalFiles(approval).length
+    ? approvalFiles(approval)
+    : plannedFilesFromHistory(task).length
+      ? plannedFilesFromHistory(task)
+      : task.metadata?.generated_files || [];
 }
 
 function cleanTaskLogs(task) {
@@ -342,13 +369,13 @@ function cleanTaskLogs(task) {
 
 function renderApprovalBanner(task) {
   const approval = taskApproval(task);
-  if (!approval) {
+  if (!approval && task.status !== "waiting_approval") {
     return "";
   }
   return `
     <div class="approval-banner">
       <strong>Action needed: You must approve file generation.</strong>
-      <span>Coding Agent needs permission to create files.</span>
+      <span>Coding Agent needs permission to create files. Approval needed from: You / Admin.</span>
       <button type="button" data-page-shortcut="approvals">Go to Approval Queue</button>
     </div>
   `;
@@ -361,7 +388,7 @@ function renderWhereIsMyApp(task) {
   return `
     <div class="where-panel">
       <strong>Where is my app?</strong>
-      <p>${escapeHtml(approval ? "Files are not created yet. Approve file generation first." : task.status === "completed" ? `Generated files are saved in: ${directory}` : "The agent is still preparing the app files.")}</p>
+      <p>${escapeHtml(approval || task.status === "waiting_approval" ? "Files are not created yet. Approve file generation first. It is pending from You / Admin, not from the agent." : task.status === "completed" ? `Generated files are saved in: ${directory}` : "The agent is still preparing the app files.")}</p>
       ${files.length ? `<button type="button" data-page-shortcut="files">Open Files</button>` : ""}
     </div>
   `;
