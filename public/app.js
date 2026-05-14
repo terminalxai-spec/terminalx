@@ -2,6 +2,7 @@ const pageTitles = {
   "command-center": "Command Center",
   chat: "Chat",
   agents: "Agents",
+  workflows: "Workflows",
   tasks: "Tasks",
   approvals: "Approval Queue",
   files: "Files",
@@ -18,6 +19,11 @@ let dashboardTasks = [];
 let dashboardApprovals = [];
 let dashboardAgents = [];
 let dashboardActionLog = [];
+let dashboardWorkflows = [];
+let dashboardBots = [];
+let dashboardWorkerJobs = [];
+let dashboardWorkflowTemplates = [];
+let dashboardIntegrations = [];
 let isGenerating = false;
 let stopGeneration = false;
 let pendingAttachmentFile = null;
@@ -248,6 +254,25 @@ function renderList(elementId, items, renderItem, emptyText) {
   }
 }
 
+function ensureWorkflowNav() {
+  const nav = document.querySelector(".nav");
+  if (!nav || document.querySelector('[data-page-link="workflows"]')) {
+    return;
+  }
+  const tasksLink = document.querySelector('[data-page-link="tasks"]');
+  const link = document.createElement("a");
+  link.href = "#workflows";
+  link.className = "nav-link";
+  link.dataset.pageLink = "workflows";
+  link.innerHTML = "<span>WF</span> Workflows";
+  nav.insertBefore(link, tasksLink || null);
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    location.hash = "#workflows";
+    showPage("workflows");
+  });
+}
+
 function agentLabel(agentId = "") {
   const agent = dashboardAgents.find((item) => item.id === agentId || item.type === agentId.replace("-agent", ""));
   return agent?.name || agentId || "Unassigned agent";
@@ -426,6 +451,94 @@ function renderDashboardAlert(approvals) {
     <span>${escapeHtml(approvals[0].title)}</span>
     <button type="button" data-page-shortcut="approvals">Review approval</button>
   `;
+}
+
+function workflowCounts() {
+  return {
+    active: dashboardWorkflows.filter((workflow) => ["queued", "running", "waiting_approval", "retrying"].includes(workflow.status)).length,
+    completed: dashboardWorkflows.filter((workflow) => workflow.status === "completed").length,
+    failed: dashboardWorkflows.filter((workflow) => workflow.status === "failed").length,
+    pendingApprovals: dashboardApprovals.length
+  };
+}
+
+function timelineForWorkflow(workflow) {
+  const states = ["planning", "executing", "waiting_approval", "retrying", "completed"];
+  const seen = new Set((workflow.timeline || []).map((event) => event.status));
+  return `
+    <div class="workflow-stepper">
+      ${states.map((state) => `<div class="workflow-step ${seen.has(state) || workflow.status === state ? "complete" : ""} ${workflow.status === state ? "active" : ""}"><span></span><small>${escapeHtml(state.replace("_", " "))}</small></div>`).join("")}
+    </div>
+  `;
+}
+
+function renderWorkflowDashboard() {
+  const summary = document.getElementById("workflow-summary");
+  if (!summary) return;
+  const counts = workflowCounts();
+  summary.innerHTML = `
+    <div class="setting-card"><strong>Active workflows</strong><div class="muted">${escapeHtml(counts.active)}</div></div>
+    <div class="setting-card"><strong>Completed workflows</strong><div class="muted">${escapeHtml(counts.completed)}</div></div>
+    <div class="setting-card"><strong>Failures</strong><div class="muted">${escapeHtml(counts.failed)}</div></div>
+    <div class="setting-card"><strong>Pending approvals</strong><div class="muted">${escapeHtml(counts.pendingApprovals)}</div></div>
+  `;
+
+  renderList(
+    "workflows-list",
+    dashboardWorkflows,
+    (workflow) => `
+      <strong>${escapeHtml(workflow.name)}</strong>
+      <div class="muted">${pill(workflow.status, workflow.status)} ${escapeHtml(workflow.goal || "")}</div>
+      ${timelineForWorkflow(workflow)}
+      <div class="muted">Steps: ${escapeHtml(workflow.steps?.length || 0)} - Updated ${escapeHtml(formatTime(workflow.updatedAt))}</div>
+      <button class="secondary-button" type="button" data-workflow-run="${escapeHtml(workflow.id)}" ${can("agents:execute") ? "" : "disabled"}>Run workflow</button>
+    `,
+    "No workflows yet."
+  );
+
+  renderList(
+    "workflow-templates-list",
+    dashboardWorkflowTemplates,
+    (template) => `
+      <strong>${escapeHtml(template.name)}</strong>
+      <div class="muted">${escapeHtml(template.description)}</div>
+      <button class="secondary-button" type="button" data-template-create="${escapeHtml(template.id)}" ${can("tasks:create") ? "" : "disabled"}>Use template</button>
+    `,
+    "No templates loaded."
+  );
+
+  renderList(
+    "worker-activity-list",
+    dashboardWorkerJobs,
+    (job) => `
+      <strong>${escapeHtml(job.status)}</strong>
+      <div class="muted">Workflow ${escapeHtml(job.workflowId)} - attempts ${escapeHtml(job.attempts || 0)}</div>
+      <div class="muted">Heartbeat ${escapeHtml(formatTime(job.heartbeatAt))}</div>
+    `,
+    "Worker is idle."
+  );
+
+  renderList(
+    "bots-list",
+    dashboardBots,
+    (bot) => `
+      <strong>${escapeHtml(bot.name)}</strong>
+      <div class="muted">${escapeHtml(bot.goal || "No goal")}</div>
+      <div class="muted">Tools: ${escapeHtml((bot.tools || []).join(", ") || "none")} - Memory ${escapeHtml(bot.memoryEnabled ? "enabled" : "off")}</div>
+    `,
+    "No custom bots yet."
+  );
+
+  renderList(
+    "integrations-list",
+    dashboardIntegrations,
+    (integration) => `
+      <strong>${escapeHtml(integration.name)}</strong>
+      <div class="muted">${pill(integration.status)} ${integration.approvalRequired ? pill("approval required", "waiting_approval") : pill("safe read")}</div>
+      <div class="muted">${escapeHtml(integration.description)}</div>
+    `,
+    "No integrations configured."
+  );
 }
 
 function renderAgents(elementId, agents) {
@@ -845,6 +958,7 @@ function renderActivityFeed() {
 }
 
 async function loadDashboard() {
+  ensureWorkflowNav();
   const settled = await Promise.allSettled([
     getJson("/api/health"),
     getJson("/api/agents"),
@@ -856,7 +970,12 @@ async function loadDashboard() {
     getJson("/api/config/database"),
     getJson("/api/config/storage"),
     getJson("/api/config/runtime"),
-    can("chat:use") ? getJson("/api/chat/history") : Promise.resolve({ history: [] })
+    can("chat:use") ? getJson("/api/chat/history") : Promise.resolve({ history: [] }),
+    can("tasks:read") ? getJson("/api/workflows") : Promise.resolve({ workflows: [] }),
+    can("tasks:read") ? getJson("/api/workflows/templates") : Promise.resolve({ templates: [] }),
+    can("tasks:read") ? getJson("/api/workflows/worker") : Promise.resolve({ jobs: [], heartbeat: { status: "offline" } }),
+    can("tasks:read") ? getJson("/api/bots") : Promise.resolve({ bots: [] }),
+    can("tasks:read") ? getJson("/api/integrations") : Promise.resolve({ integrations: [] })
   ]);
   const valueAt = (index, fallback) => {
     if (settled[index].status === "fulfilled") {
@@ -879,6 +998,11 @@ async function loadDashboard() {
     llmProvider: { id: "unknown", status: "unavailable", note: "Unavailable" }
   });
   const chatHistory = valueAt(10, { history: [] });
+  const workflows = valueAt(11, { workflows: [] });
+  const templates = valueAt(12, { templates: [] });
+  const worker = valueAt(13, { jobs: [], heartbeat: { status: "offline" } });
+  const bots = valueAt(14, { bots: [] });
+  const integrations = valueAt(15, { integrations: [] });
 
   const healthDot = document.getElementById("health-dot");
   const healthPill = document.getElementById("health-pill");
@@ -893,6 +1017,11 @@ async function loadDashboard() {
   dashboardFiles = files.files;
   dashboardApprovals = approvals.approvals;
   dashboardAgents = agents.agents;
+  dashboardWorkflows = workflows.workflows || [];
+  dashboardWorkflowTemplates = templates.templates || [];
+  dashboardWorkerJobs = worker.jobs || [];
+  dashboardBots = bots.bots || [];
+  dashboardIntegrations = integrations.integrations || [];
   renderDashboardAlert(approvals.approvals);
   if (actionLog.actions?.length) {
     dashboardActionLog = actionLog.actions;
@@ -937,6 +1066,7 @@ async function loadDashboard() {
     "No chat messages yet."
   );
   renderChatPage(chatHistory.history);
+  renderWorkflowDashboard();
   renderActivityFeed();
 
   renderList(
@@ -1607,6 +1737,68 @@ async function decideApproval(event) {
   await loadDashboard();
 }
 
+async function createBot(event) {
+  event.preventDefault();
+  if (!can("tasks:create")) return;
+  const nameInput = document.getElementById("bot-name-input");
+  const goalInput = document.getElementById("bot-goal-input");
+  const response = await apiFetch("/api/bots", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: nameInput.value.trim() || "TerminalX Bot",
+      goal: goalInput.value.trim(),
+      instructions: "Follow TerminalX approval policy and save reusable outputs to memory.",
+      tools: ["web-search", "output-save"],
+      memory_enabled: true,
+      approval_policy: "human_required_for_risky_actions"
+    })
+  });
+  if (!response.ok) {
+    showToast(await readErrorMessage(response, "Bot creation failed."), "error");
+    return;
+  }
+  nameInput.value = "";
+  goalInput.value = "";
+  showToast("Bot created", "success");
+  await loadDashboard();
+}
+
+async function handleWorkflowClick(event) {
+  const templateButton = event.target.closest("[data-template-create]");
+  const runButton = event.target.closest("[data-workflow-run]");
+  if (templateButton) {
+    const response = await apiFetch("/api/workflows", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        template_id: templateButton.dataset.templateCreate,
+        goal: "Created from TerminalX workflow template"
+      })
+    });
+    if (!response.ok) {
+      showToast(await readErrorMessage(response, "Workflow creation failed."), "error");
+      return;
+    }
+    showToast("Workflow created", "success");
+    await loadDashboard();
+  }
+  if (runButton) {
+    const response = await apiFetch(`/api/workflows/${runButton.dataset.workflowRun}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}"
+    });
+    if (!response.ok) {
+      showToast(await readErrorMessage(response, "Workflow run failed."), "error");
+      return;
+    }
+    await apiFetch("/api/workflows/worker/tick", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    showToast("Workflow queued", "success");
+    await loadDashboard();
+  }
+}
+
 window.addEventListener("hashchange", () => showPage(location.hash.slice(1)));
 document.getElementById("sidebar-toggle").addEventListener("click", toggleSidebar);
 document.getElementById("login-form").addEventListener("submit", login);
@@ -1681,6 +1873,8 @@ document.getElementById("tasks-list").addEventListener("click", (event) => {
   const taskId = record.id.replace(/^task-/, "");
   renderTaskDrawer(dashboardTasks.find((task) => task.id === taskId));
 });
+document.getElementById("bot-create-form")?.addEventListener("submit", createBot);
+document.getElementById("workflows")?.addEventListener("click", handleWorkflowClick);
 document.body.addEventListener("click", (event) => {
   const shortcut = event.target.closest("[data-page-shortcut]");
   if (!shortcut) {

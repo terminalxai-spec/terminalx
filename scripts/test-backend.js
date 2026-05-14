@@ -15,6 +15,7 @@ const { createApprovalQueue } = require("../services/agent-runtime/src/approvals
 const { createStorageService } = require("../services/file-service/src/storage");
 const { createToolRegistry } = require("../services/agent-runtime/src/tools/tool-registry");
 const { resolveWorkspacePath } = require("../services/agent-runtime/src/workspace/execution-workspace");
+const { createWorkflowEngine } = require("../services/agent-runtime/src/workflows/workflow-engine");
 const {
   createSessionToken,
   hashPassword,
@@ -501,6 +502,42 @@ async function testExecutionWorkspaceTools() {
   repository.close();
 }
 
+function testWorkflowEngine() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository)
+  });
+  const bot = engine.createBot({
+    name: "Research Bot",
+    goal: "Find useful topics",
+    tools: ["web-search"],
+    memory_enabled: true,
+    schedules: ["daily"],
+    approval_policy: "human_required_for_risky_actions"
+  });
+  assert.equal(engine.listBots()[0].name, "Research Bot");
+  assert.equal(engine.getBotMemory(bot.id).history.length, 0);
+  engine.saveBotMemory(bot.id, { preferences: { tone: "direct" }, reusablePrompts: ["Summarize findings"] });
+  assert.equal(engine.getBotMemory(bot.id).preferences.tone, "direct");
+  assert.equal(engine.templates().some((template) => template.id === "app-builder"), true);
+  assert.equal(engine.integrations().some((integration) => integration.id === "gmail"), true);
+
+  const workflow = engine.createWorkflow({ template_id: "app-builder", name: "Build app workflow" });
+  const started = engine.startWorkflow(workflow.id);
+  assert.equal(started.job.status, "queued");
+  const firstTick = engine.tickWorker();
+  assert.equal(firstTick.workflow.steps[0].status, "completed");
+  const secondTick = engine.tickWorker();
+  assert.equal(secondTick.workflow.status, "waiting_approval");
+  assert.equal(approvalQueue.list({ status: "pending" }).some((approval) => approval.requestedBy === "workflow-engine"), true);
+  assert.equal(engine.listJobs().some((job) => job.status === "waiting_approval"), true);
+  repository.close();
+}
+
 async function testAiProviders() {
   const previousProvider = process.env.LLM_PROVIDER;
   const previousOpenAiKey = process.env.OPENAI_API_KEY;
@@ -880,6 +917,37 @@ async function testRbacHttpFlow() {
     const workspaceLogs = await request(baseUrl, `/api/workspaces/${calculatorSearch.body.tasks[0].id}/logs`, { headers: adminHeaders });
     assert.equal(workspaceLogs.response.status, 200);
 
+    const templatesResponse = await request(baseUrl, "/api/workflows/templates", { headers: adminHeaders });
+    assert.equal(templatesResponse.body.templates.some((template) => template.id === "youtube-automation"), true);
+    const botResponse = await request(baseUrl, "/api/bots", {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ name: "Lead Bot", goal: "Find leads", tools: ["web-search"], memory_enabled: true })
+    });
+    assert.equal(botResponse.response.status, 201);
+    const memoryResponse = await request(baseUrl, `/api/bots/${botResponse.body.bot.id}/memory`, { headers: adminHeaders });
+    assert.equal(memoryResponse.body.memory.botId, botResponse.body.bot.id);
+    const workflowResponse = await request(baseUrl, "/api/workflows", {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ template_id: "research-workflow", name: "Research smoke" })
+    });
+    assert.equal(workflowResponse.response.status, 201);
+    const runWorkflow = await request(baseUrl, `/api/workflows/${workflowResponse.body.workflow.id}/run`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: "{}"
+    });
+    assert.equal(runWorkflow.response.status, 200);
+    const workerTick = await request(baseUrl, "/api/workflows/worker/tick", {
+      method: "POST",
+      headers: adminHeaders,
+      body: "{}"
+    });
+    assert.equal(["running", "completed", "waiting_approval"].includes(workerTick.body.status), true);
+    const integrationsResponse = await request(baseUrl, "/api/integrations", { headers: adminHeaders });
+    assert.equal(integrationsResponse.body.integrations.some((integration) => integration.id === "github"), true);
+
     const viewerEmail = `viewer-${Date.now()}@terminalx.local`;
     const viewerRegister = await request(baseUrl, "/api/auth/register", {
       method: "POST",
@@ -948,6 +1016,7 @@ async function main() {
   testPostgresRepositoryInterface();
   await testFileStorageProviders();
   await testExecutionWorkspaceTools();
+  testWorkflowEngine();
   await testAiProviders();
   await testAgentOrchestrator();
   await testChatAgentUsesLlmProvider();

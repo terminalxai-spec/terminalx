@@ -18,6 +18,7 @@ const { getRuntimeConfig } = require("../../agent-runtime/src/config/runtime");
 const { createLlmProvider } = require("../../agent-runtime/src/llm/provider");
 const { createToolRegistry } = require("../../agent-runtime/src/tools/tool-registry");
 const { createTaskWorkspace, listWorkspaceFiles, listWorkspaceLogs } = require("../../agent-runtime/src/workspace/execution-workspace");
+const { createWorkflowEngine } = require("../../agent-runtime/src/workflows/workflow-engine");
 const { createStorageService } = require("../../file-service/src/storage");
 const { hasPermission, seedRbac } = require("./rbac");
 const {
@@ -72,6 +73,12 @@ const storageService = createStorageService({
   appendTaskHistory
 });
 const llmProvider = createLlmProvider();
+const workflowEngine = createWorkflowEngine({
+  repository: database,
+  approvalQueue,
+  appendTaskHistory,
+  createTask
+});
 function taskToolRegistry(taskId, agentId = "coding-agent") {
   return createToolRegistry({
     taskId,
@@ -207,6 +214,9 @@ function isProtectedPath(url) {
     "/api/approvals",
     "/api/files",
     "/api/workspaces",
+    "/api/workflows",
+    "/api/bots",
+    "/api/integrations",
     "/api/command",
     "/api/chat",
     "/api/action-log"
@@ -374,6 +384,73 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { permissionModes: [] });
     }
     return sendJson(res, 200, { permissionModes });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/workflows/templates") {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    return sendJson(res, 200, { templates: workflowEngine.templates() });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/workflows/worker") {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    return sendJson(res, 200, {
+      jobs: workflowEngine.listJobs(),
+      heartbeat: {
+        status: "online",
+        checkedAt: new Date().toISOString()
+      }
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/workflows/worker/tick") {
+    if (!requirePermission(req, res, "agents:execute")) return;
+    return sendJson(res, 200, workflowEngine.tickWorker());
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/workflows") {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    return sendJson(res, 200, { workflows: workflowEngine.listWorkflows() });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/workflows") {
+    if (!requirePermission(req, res, "tasks:create")) return;
+    const payload = await readJsonBody(req);
+    return sendJson(res, 201, { workflow: workflowEngine.createWorkflow(payload) });
+  }
+
+  if (req.method === "POST" && url.pathname.match(/^\/api\/workflows\/[^/]+\/run$/)) {
+    if (!requirePermission(req, res, "agents:execute")) return;
+    const workflowId = url.pathname.split("/")[3];
+    return sendJson(res, 200, workflowEngine.startWorkflow(workflowId));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/bots") {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    return sendJson(res, 200, { bots: workflowEngine.listBots() });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/bots") {
+    if (!requirePermission(req, res, "tasks:create")) return;
+    const payload = await readJsonBody(req);
+    return sendJson(res, 201, { bot: workflowEngine.createBot(payload) });
+  }
+
+  if (req.method === "GET" && url.pathname.match(/^\/api\/bots\/[^/]+\/memory$/)) {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    const botId = url.pathname.split("/")[3];
+    return sendJson(res, 200, { memory: workflowEngine.getBotMemory(botId) });
+  }
+
+  if (req.method === "POST" && url.pathname.match(/^\/api\/bots\/[^/]+\/memory$/)) {
+    if (!requirePermission(req, res, "tasks:update")) return;
+    const botId = url.pathname.split("/")[3];
+    const payload = await readJsonBody(req);
+    return sendJson(res, 200, { memory: workflowEngine.saveBotMemory(botId, payload) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/integrations") {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    return sendJson(res, 200, { integrations: workflowEngine.integrations() });
   }
 
   if (req.method === "GET" && url.pathname === "/api/tasks") {

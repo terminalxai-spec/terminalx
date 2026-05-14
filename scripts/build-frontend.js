@@ -42,6 +42,10 @@ assert.match(indexHtml, /data-page="command-center"/, "Command Center page is mi
 assert.match(indexHtml, /data-page="chat"/, "Chat page is missing");
 assert.match(indexHtml, /data-page-link="chat"/, "Chat sidebar link is missing");
 assert.match(indexHtml, /data-page="agents"/, "Agents page is missing");
+assert.match(indexHtml, /data-page="workflows"/, "Workflows page is missing");
+assert.match(indexHtml, /id="workflow-summary"/, "Workflow dashboard summary is missing");
+assert.match(indexHtml, /id="bot-create-form"/, "Custom Bot Builder form is missing");
+assert.match(indexHtml, /id="worker-activity-list"/, "Worker activity list is missing");
 assert.match(indexHtml, /data-page="tasks"/, "Tasks page is missing");
 assert.match(indexHtml, /data-page="approvals"/, "Approval Queue page is missing");
 assert.match(indexHtml, /data-page="files"/, "Files page is missing");
@@ -84,6 +88,11 @@ assert.match(appJs, /files:delete/, "Dashboard must gate file deletion by permis
 assert.match(appJs, /chat:use/, "Dashboard must gate chat by permission");
 assert.match(appJs, /agents:execute/, "Dashboard must gate CEO task suggestions by permission");
 assert.match(appJs, /\/api\/chat\/history/, "Dashboard must load chat history");
+assert.match(appJs, /\/api\/workflows/, "Dashboard must load workflows");
+assert.match(appJs, /\/api\/bots/, "Dashboard must support custom bots");
+assert.match(appJs, /\/api\/integrations/, "Dashboard must show integrations");
+assert.match(appJs, /renderWorkflowDashboard/, "Dashboard must render workflow dashboard");
+assert.match(appJs, /timelineForWorkflow/, "Dashboard must render workflow execution timelines");
 assert.match(appJs, /\/api\/chat/, "Dashboard must send chat messages");
 assert.match(appJs, /message-bubble/, "Dashboard must render chat bubbles");
 assert.match(appJs, /renderMarkdown/, "Dashboard must render markdown");
