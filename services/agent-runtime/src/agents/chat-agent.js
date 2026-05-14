@@ -37,10 +37,6 @@ function classifyChatIntent(message, payload = {}) {
     return "explain_task";
   }
 
-  if (/\b(create|build|make|implement|generate|fix|analyze repo|write code|create document)\b/i.test(normalized)) {
-    return "action_request";
-  }
-
   if (/\b(approval|approve|pending approval|pending approvals|blocked|waiting approval|human gate)\b/i.test(normalized)) {
     return "approval_query";
   }
@@ -61,11 +57,45 @@ function classifyChatIntent(message, payload = {}) {
     return "system_status";
   }
 
+  if (classifyExecutionRequest(message) !== "quick_query" && classifyExecutionRequest(message) !== "none") {
+    return "action_request";
+  }
+
+  if (classifyExecutionRequest(message) === "quick_query") {
+    return "quick_query";
+  }
+
   if (normalized.includes("plan") || normalized.includes("roadmap") || normalized.includes("steps")) {
     return "plan_work";
   }
 
+  if (/\b(create|build|make|implement|generate|fix|analyze repo|write code|create document)\b/i.test(normalized)) {
+    return "action_request";
+  }
+
   return "general_question";
+}
+
+function classifyExecutionRequest(message = "") {
+  const normalized = String(message || "").toLowerCase();
+  if (/\b(gold price|gold rate|weather|temperature|forecast|latest ai news|latest news|news today|stock price|share price|price of)\b/i.test(normalized)) return "quick_query";
+  if (/\b(latest|news|research|competitor|market research|find information|investigate)\b/i.test(normalized)) return "research_task";
+  if (/\b(faceless video|youtube video|generate report|create report|generate script|content package|blog article|twitter thread|instagram reel)\b/i.test(normalized)) return "generation_task";
+  if (/\b(deploy|vercel|publish saas|deploy saas|launch app|production)\b/i.test(normalized)) return "deployment_task";
+  if (/\b(open website|browse|browser|scrape|extract from website|click|login)\b/i.test(normalized)) return "browser_task";
+  if (/\b(create|build|make|implement|fix|write code|app|api server|website|saas)\b/i.test(normalized)) return "generation_task";
+  return "none";
+}
+
+function answerQuickQuery(message = "") {
+  const normalized = String(message || "").toLowerCase();
+  if (/\bgold (price|rate)\b/i.test(normalized)) {
+    return "Gold price request received. Live market feed is not connected in this workspace, so I cannot quote a verified real-time price. Connect a market-data provider to TerminalX for exact live XAU/USD or local gold rates.";
+  }
+  if (/\bweather|temperature|forecast\b/i.test(normalized)) {
+    return "Weather request received. Live weather provider is not connected in this workspace, so I cannot quote verified real-time weather yet. Connect a weather API provider for live local forecasts.";
+  }
+  return "Quick answer request received. No external live-data provider is connected for this query yet.";
 }
 
 function buildPlan(message) {
@@ -465,7 +495,7 @@ function answerGeneralQuestion(message) {
   return [
     "I am the TerminalX Chat Agent.",
     "I can answer general questions, summarize uploaded files, explain tasks, and help plan work.",
-    `For this request, I would start by routing or planning around: ${message}`
+    `Request received: ${message}`
   ].join("\n");
 }
 
@@ -478,6 +508,21 @@ function providerFallbackNotice(error) {
     return "Cloud AI provider was too slow or unreachable. I switched to TerminalX fallback mode so you can keep working.";
   }
   return "Cloud AI provider is unavailable. I switched to TerminalX fallback mode so you can keep working.";
+}
+
+function removeRoutingNarration(text = "") {
+  return String(text || "")
+    .replace(/\bI\s+(recommend|suggest)\s+[^.\n]*(route|routing)[^.\n]*[.\n]?/gi, "")
+    .replace(/\bCEO Agent should[^.\n]*[.\n]?/gi, "")
+    .replace(/\bThe WebSearch Agent can[^.\n]*[.\n]?/gi, "")
+    .replace(/\bWebSearch Agent can[^.\n]*[.\n]?/gi, "")
+    .replace(/\bPlease let the CEO Agent[^.\n]*[.\n]?/gi, "")
+    .replace(/\b(?:please\s+)?(?:route|routing)\s+this\s+(request|query)[^.\n]*[.\n]?/gi, "")
+    .replace(/\blet the CEO Agent know[^.\n]*(route|routing)[^.\n]*[.\n]?/gi, "")
+    .replace(/\b(?:the\s+)?WebSearch Agent[^.\n]*(fetch|search|provide)[^.\n]*[.\n]?/gi, "")
+    .replace(/would start by routing or planning around:/gi, "Request received:")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 async function answerWithLlm({ message, intent, llmProvider }) {
@@ -493,7 +538,7 @@ async function answerWithLlm({ message, intent, llmProvider }) {
       system: [
         "You are TerminalX Chat Agent inside a multi-agent operating system.",
         "Answer clearly and practically.",
-        "If the user asks for work to be done, suggest how the CEO Agent should route it.",
+        "If the user asks for work to be done, state that TerminalX can start an execution workflow.",
         "Do not claim that files were modified unless a tool result says so."
       ].join(" "),
       message: [`Intent: ${intent}`, `User: ${message}`].join("\n"),
@@ -502,7 +547,7 @@ async function answerWithLlm({ message, intent, llmProvider }) {
       timeoutMs
     });
 
-    return result.text;
+    return removeRoutingNarration(result.text);
   } catch (error) {
     return [
       answerGeneralQuestion(message),
@@ -519,6 +564,7 @@ function createChatAgent({
   findTask,
   llmProvider = null,
   orchestrateAction = null,
+  executeQuickQuery = null,
   getSystemStatus = null
 }) {
   function getOrCreateConversation(conversationId) {
@@ -603,24 +649,47 @@ function createChatAgent({
     } else if (["task_status", "agent_status", "approval_query", "file_query", "system_status"].includes(intent)) {
       statusReport = buildStatusReportForMessage(message, typeof getSystemStatus === "function" ? getSystemStatus() : {});
       response = statusReport.response;
+    } else if (intent === "quick_query") {
+      try {
+        const quickResult = typeof executeQuickQuery === "function"
+          ? await executeQuickQuery({ message, executionClass: "quick_query" })
+          : null;
+        orchestration = quickResult ? {
+          status: quickResult.status,
+          execution_class: "quick_query",
+          sources: quickResult.sources || []
+        } : null;
+        response = quickResult?.response || answerQuickQuery(message);
+      } catch (error) {
+        response = `Execution error: ${error.message}`;
+      }
     } else if (intent === "action_request" && typeof orchestrateAction === "function") {
+      const executionClass = classifyExecutionRequest(message);
       orchestration = await orchestrateAction({
         command: message,
         executionMode: payload.execution_mode || payload.executionMode || "execution",
-        conversationId: conversation.id
+        conversationId: conversation.id,
+        executionClass
       });
-      response = [
-        `CEO Agent accepted the request and assigned ${orchestration.selected_agent?.name || "a specialist agent"}.`,
-        `Task: ${orchestration.task?.title || orchestration.task_id}`,
-        `Status: ${orchestration.status}`,
-        orchestration.approval_required ? `Approval required: ${orchestration.approval_id}` : "Execution pipeline started."
-      ].join("\n");
+      response = orchestration.workflow_id
+        ? [
+            `Workflow created: ${orchestration.workflow?.name || orchestration.workflow_id}`,
+            `Status: ${orchestration.status}`,
+            `Workflow ID: ${orchestration.workflow_id}`,
+            orchestration.task_id ? `Task ID: ${orchestration.task_id}` : "Background execution started."
+          ].join("\n")
+        : [
+            `Task: ${orchestration.task?.title || orchestration.task_id}`,
+            `Status: ${orchestration.status}`,
+            orchestration.approval_required ? `Approval required: ${orchestration.approval_id}` : "Execution started."
+          ].join("\n");
     } else if (intent === "plan_work") {
       response = await answerWithLlm({ message, intent, llmProvider }) || buildPlan(message);
     } else {
       response = await answerWithLlm({ message, intent, llmProvider }) || answerGeneralQuestion(message);
     }
 
+    response = removeRoutingNarration(response) || (intent === "quick_query" ? "Execution error: no answer was produced." : "Execution started.");
     const taskSuggestions = buildTaskSuggestions(message, intent);
     appendMessage(conversation, "assistant", response, {
       intent,
@@ -674,9 +743,11 @@ module.exports = {
   buildStatusReportForMessage,
   buildSystemStatus,
   buildTaskStatus,
+  classifyExecutionRequest,
   classifyChatIntent,
   createChatAgent,
   extractTaskKeyword,
+  removeRoutingNarration,
   searchTasks,
   uniqueRecentTasks
 };

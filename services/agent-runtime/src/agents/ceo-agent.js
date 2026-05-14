@@ -313,7 +313,7 @@ function handleCommand({ command, createTask, approvalQueue }) {
       selected_agent: classification.agent,
       task_id: task.id,
       status: "approval_required",
-      response: `CEO Agent routed this to ${classification.agent.name}, but approval is required before execution.`,
+      response: "Approval is required before execution.",
       approval_required: true,
       approval_id: approval.id
     };
@@ -405,7 +405,7 @@ async function handleCommandWithAi({ command, createTask, approvalQueue, llmProv
       selected_agent: classification.agent,
       task_id: task.id,
       status: "waiting_approval",
-      response: `CEO Agent routed this to ${classification.agent.name}, but approval is required before execution.`,
+      response: "Approval is required before execution.",
       approval_required: true,
       approval_id: approval.id,
       classifier: classification.classifier

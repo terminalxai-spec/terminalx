@@ -4,7 +4,8 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const { classifyIntent, evaluateRisk, handleCommandWithAi } = require("../services/agent-runtime/src/agents/ceo-agent");
-const { createChatAgent } = require("../services/agent-runtime/src/agents/chat-agent");
+const { classifyExecutionRequest, createChatAgent, removeRoutingNarration } = require("../services/agent-runtime/src/agents/chat-agent");
+const codingAgent = require("../services/agent-runtime/src/agents/coding-agent");
 const { TASK_STATUSES, createAgentOrchestrator } = require("../services/agent-runtime/src/agents/orchestrator");
 const { getRuntimeConfig, normalizeRuntimeMode } = require("../services/agent-runtime/src/config/runtime");
 const { evaluateCommandPermission } = require("../services/agent-runtime/src/permissions/policy");
@@ -104,34 +105,136 @@ async function testCeoCreatesCodingBuildTask() {
 async function testChatEscalatesActionRequests() {
   const repository = createDatabaseRepository({ memory: true });
   const approvalQueue = createApprovalQueue(repository);
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository)
+  });
   const chatAgent = createChatAgent({
     conversationRepository: repository,
     storageService: { read: async () => null },
     findTask: (taskId) => repository.findTask(taskId),
-    orchestrateAction: ({ command }) =>
-      handleCommandWithAi({
-        command,
-        createTask: (payload) => repository.createTask(payload),
-        approvalQueue,
-        orchestrator,
-        llmProvider: {
-          async classifyIntent() {
-            return { intent: "coding", provider: "test" };
-          }
-        }
-      })
-  });
-  const orchestrator = createAgentOrchestrator({
-    repository,
-    approvalQueue,
-    chatAgent,
-    workspaceRoot: process.cwd()
+    orchestrateAction: ({ command, executionClass }) => {
+      const workflow = engine.createWorkflow({
+        template_id: executionClass === "research_task" ? "research-workflow" : "app-builder",
+        name: command,
+        goal: command
+      });
+      const started = engine.startWorkflow(workflow.id);
+      return {
+        selected_agent: agentRegistry.find((agent) => agent.type === "ceo"),
+        status: "queued",
+        workflow_id: workflow.id,
+        workflow: started.workflow,
+        approval_required: false
+      };
+    }
   });
   const result = await chatAgent.respond({ message: "build calculator app" });
   assert.equal(result.intent, "action_request");
-  assert.equal(result.orchestration.selected_agent.type, "coding");
-  assert.equal(repository.listTasks().length, 1);
-  assert.equal(repository.listTasks()[0].status, "waiting_approval");
+  assert.equal(result.orchestration.status, "queued");
+  assert.ok(result.orchestration.workflow_id);
+  assert.equal(engine.getWorkflow(result.orchestration.workflow_id).status, "queued");
+  assert.doesNotMatch(result.response, /recommend routing|suggest routing/i);
+  repository.close();
+}
+
+async function testAutomaticExecutionClassificationAndQuickQuery() {
+  assert.equal(classifyExecutionRequest("gold rate today"), "quick_query");
+  assert.equal(classifyExecutionRequest("latest AI news"), "quick_query");
+  assert.equal(classifyExecutionRequest("stock price of MSFT"), "quick_query");
+  assert.equal(classifyExecutionRequest("competitor research for my SaaS"), "research_task");
+  assert.equal(classifyExecutionRequest("create faceless video about AI"), "generation_task");
+  assert.equal(classifyExecutionRequest("deploy SaaS to vercel"), "deployment_task");
+
+  const repository = createDatabaseRepository({ memory: true });
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    executeQuickQuery: async ({ message }) => ({
+      status: "completed",
+      response: `Direct research answer for ${message}\nSources:\n- Market source: https://research.local/market`,
+      sources: [{ title: "Market source", url: "https://research.local/market" }]
+    })
+  });
+  const result = await chatAgent.respond({ message: "gold price" });
+  assert.equal(result.intent, "quick_query");
+  assert.match(result.response, /Direct research answer/);
+  assert.equal(result.orchestration.status, "completed");
+  assert.doesNotMatch(result.response, /recommend routing|suggest routing|would start by routing/i);
+  repository.close();
+}
+
+async function testRoutingNarrationNeverAppears() {
+  const repository = createDatabaseRepository({ memory: true });
+  assert.equal(
+    removeRoutingNarration("I recommend routing this query to the WebSearch Agent. The WebSearch Agent can fetch rates. Please let the CEO Agent know to route this query."),
+    ""
+  );
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    llmProvider: {
+      async sendMessage() {
+        return {
+          text: "I recommend routing this query to the WebSearch Agent. The WebSearch Agent can fetch rates. Please let the CEO Agent know to route this query."
+        };
+      }
+    }
+  });
+  const result = await chatAgent.respond({ message: "hello" });
+  assert.doesNotMatch(result.response, /recommend routing|CEO Agent should|WebSearch Agent can|Please let the CEO Agent|WebSearch Agent|route this query/i);
+  repository.close();
+}
+
+async function testFailedQuickQueryReturnsConciseError() {
+  const repository = createDatabaseRepository({ memory: true });
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    executeQuickQuery: async () => {
+      throw new Error("research provider failed");
+    }
+  });
+  const result = await chatAgent.respond({ message: "weather today" });
+  assert.equal(result.intent, "quick_query");
+  assert.equal(result.response, "Execution error: research provider failed");
+  assert.doesNotMatch(result.response, /recommend routing|CEO Agent should|WebSearch Agent can|Please let the CEO Agent/i);
+  repository.close();
+}
+
+async function testResearchRequestQueuesWorkflow() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository)
+  });
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    orchestrateAction: ({ command, executionClass }) => {
+      const workflow = engine.createWorkflow({
+        template_id: executionClass === "research_task" ? "research-workflow" : "app-builder",
+        name: command,
+        goal: command
+      });
+      const started = engine.startWorkflow(workflow.id);
+      return { status: "queued", workflow_id: workflow.id, workflow: started.workflow, approval_required: false };
+    }
+  });
+  const result = await chatAgent.respond({ message: "competitor research for TerminalX" });
+  assert.equal(result.intent, "action_request");
+  assert.equal(result.orchestration.workflow.templateId, "research-workflow");
+  assert.match(result.response, /Workflow created/);
+  assert.doesNotMatch(result.response, /recommend routing|suggest routing/i);
   repository.close();
 }
 
@@ -502,6 +605,164 @@ async function testExecutionWorkspaceTools() {
   repository.close();
 }
 
+async function testDynamicCodingGeneration() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const task = repository.createTask({
+    title: "Build API Server",
+    description: "Create a lightweight API server with health endpoint and tests",
+    assignedAgentId: "coding-agent",
+    status: "created",
+    intent: "coding",
+    metadata: { requirements: ["API server", "health endpoint", "tests"] }
+  });
+  const planned = codingAgent.executeAssignedTask({
+    task,
+    command: task.description,
+    approvalQueue
+  });
+  assert.equal(planned.approval_required, true);
+  assert.equal(planned.proposed_files.some((file) => /package\.json$/.test(file.path)), true);
+  assert.equal(planned.proposed_files.some((file) => /server\.test\.js$/.test(file.path)), true);
+
+  const approval = approvalQueue.get(planned.approval_id);
+  approvalQueue.decide(approval.id, "approved", "test");
+  const result = await codingAgent.completeApprovedTask({
+    task,
+    approval,
+    toolRegistry: createToolRegistry({
+      taskId: task.id,
+      agentId: "coding-agent",
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository)
+    }),
+    storeFile: async (filePayload) => repository.upsertFile({
+      id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      task_id: filePayload.task_id,
+      filename: filePayload.filename,
+      path: filePayload.path,
+      mime_type: filePayload.mime_type,
+      size_bytes: Buffer.byteLength(filePayload.content || ""),
+      provider: "local",
+      bucket: "local",
+      onlineConfigured: false,
+      metadata: filePayload.metadata || {}
+    })
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.test_result.status, "passed");
+  assert.equal(result.files.some((file) => /package\.json$/.test(file.path)), true);
+  assert.equal(result.files.some((file) => /server\.js$/.test(file.path)), true);
+  assert.equal(result.logs.includes("generating"), true);
+  assert.equal(result.logs.includes("testing"), true);
+  assert.equal(result.logs.includes("saving_outputs"), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(task.id, "outputs", "result.json").resolved), true);
+  repository.close();
+}
+
+async function testCodingAgentSelfFixLoop() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const task = repository.createTask({
+    title: "Build Self-Fix API Server",
+    description: "Create an API server with self-fix initial failure and tests",
+    assignedAgentId: "coding-agent",
+    status: "created",
+    intent: "coding",
+    metadata: { requirements: ["API server", "self-fix initial failure", "tests"] }
+  });
+  const planned = codingAgent.executeAssignedTask({ task, command: task.description, approvalQueue });
+  const approval = approvalQueue.get(planned.approval_id);
+  approvalQueue.decide(approval.id, "approved", "test");
+  const result = await codingAgent.completeApprovedTask({
+    task,
+    approval,
+    toolRegistry: createToolRegistry({
+      taskId: task.id,
+      agentId: "coding-agent",
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository)
+    }),
+    storeFile: async (filePayload) => repository.upsertFile({
+      id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      task_id: filePayload.task_id,
+      filename: filePayload.filename,
+      path: filePayload.path,
+      mime_type: filePayload.mime_type,
+      size_bytes: Buffer.byteLength(filePayload.content || ""),
+      provider: "local",
+      bucket: "local",
+      onlineConfigured: false,
+      metadata: filePayload.metadata || {}
+    })
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.test_result.status, "passed");
+  assert.equal(result.logs.includes("fixing"), true);
+  assert.equal(result.logs.includes("retesting"), true);
+  assert.equal(result.fix_attempts.length, 1);
+  assert.equal(Math.max(...result.iterations.map((entry) => entry.iteration)) <= 3, true);
+  const output = fs.readFileSync(resolveWorkspacePath(task.id, "outputs", "result.json").resolved, "utf8");
+  assert.match(output, /iterationHistory/);
+  repository.close();
+}
+
+async function testCodingAgentRetryLimitEnforced() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const task = repository.createTask({
+    title: "Build Unfixable Utility",
+    description: "Create generic implementation with tests",
+    assignedAgentId: "coding-agent",
+    status: "created",
+    intent: "coding"
+  });
+  const approval = approvalQueue.add({
+    taskId: task.id,
+    title: "Approve unfixable generated test",
+    approvalType: "repo_modification",
+    riskLevel: "medium",
+    requestedBy: "coding-agent",
+    proposedAction: {
+      command: task.description,
+      proposedFiles: [
+        { path: "terminalx-generated/unfixable/index.js", purpose: "Implementation" },
+        { path: "terminalx-generated/unfixable/index.test.js", purpose: "Intentionally unfixable test", test: true }
+      ]
+    }
+  });
+  approvalQueue.decide(approval.id, "approved", "test");
+  const result = await codingAgent.completeApprovedTask({
+    task,
+    approval,
+    toolRegistry: createToolRegistry({
+      taskId: task.id,
+      agentId: "coding-agent",
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository)
+    }),
+    storeFile: async (filePayload) => repository.upsertFile({
+      id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      task_id: filePayload.task_id,
+      filename: filePayload.filename,
+      path: filePayload.path,
+      mime_type: filePayload.mime_type,
+      size_bytes: Buffer.byteLength(filePayload.content || ""),
+      provider: "local",
+      bucket: "local",
+      onlineConfigured: false,
+      metadata: filePayload.metadata || {}
+    })
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(Math.max(...result.iterations.map((entry) => entry.iteration)) <= 3, true);
+  assert.equal(result.logs.includes("failed"), true);
+  repository.close();
+}
+
 function testWorkflowEngine() {
   const repository = createDatabaseRepository({ memory: true });
   const approvalQueue = createApprovalQueue(repository);
@@ -535,6 +796,502 @@ function testWorkflowEngine() {
   assert.equal(secondTick.workflow.status, "waiting_approval");
   assert.equal(approvalQueue.list({ status: "pending" }).some((approval) => approval.requestedBy === "workflow-engine"), true);
   assert.equal(engine.listJobs().some((job) => job.status === "waiting_approval"), true);
+  repository.close();
+}
+
+async function testWorkflowCodingApprovalResume() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    executeCodingTask: codingAgent.executeAssignedTask
+  });
+  const workflow = engine.createWorkflow({ template_id: "app-builder", name: "Workflow calculator", goal: "create calculator app" });
+  engine.startWorkflow(workflow.id);
+  engine.tickWorker();
+  const paused = engine.tickWorker();
+  assert.equal(paused.workflow.status, "waiting_approval");
+  const task = repository.listTasks().find((entry) => entry.metadata?.workflow_id === workflow.id);
+  const approval = approvalQueue.list({ status: "pending" }).find((entry) => entry.taskId === task.id);
+  approvalQueue.decide(approval.id, "approved", "test");
+  const result = await codingAgent.completeApprovedTask({
+    task,
+    approval,
+    toolRegistry: createToolRegistry({
+      taskId: task.id,
+      agentId: "coding-agent",
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository)
+    }),
+    storeFile: async (filePayload) => repository.upsertFile({
+      id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      task_id: filePayload.task_id,
+      filename: filePayload.filename,
+      path: filePayload.path,
+      mime_type: filePayload.mime_type,
+      size_bytes: Buffer.byteLength(filePayload.content || ""),
+      provider: "local",
+      bucket: "local",
+      onlineConfigured: false,
+      metadata: filePayload.metadata || {}
+    })
+  });
+  const resumed = engine.resumeCodingTask(task, result);
+  assert.equal(result.status, "completed");
+  assert.equal(resumed.status, "completed");
+  assert.equal(resumed.steps.find((step) => step.id === "code").status, "completed");
+  assert.equal(resumed.steps.find((step) => step.id === "test").status, "completed");
+  assert.equal(engine.listJobs().some((job) => job.workflowId === workflow.id && job.status === "completed"), true);
+  repository.close();
+}
+
+async function testAsyncWorkflowBackgroundExecution() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository)
+  });
+  const workflow = engine.createWorkflow({ template_id: "research-workflow", name: "Async research", goal: "async workflow" });
+  const started = engine.startWorkflow(workflow.id);
+  assert.equal(started.workflow.status, "queued");
+  assert.equal(engine.getWorkflow(workflow.id).steps.every((step) => step.status === "pending"), true);
+  let tick = await engine.runBackgroundOnce();
+  assert.equal(["running", "completed"].includes(tick.workflow.status), true);
+  assert.equal(tick.workflow.timeline.some((event) => ["queued", "researching", "executing"].includes(event.status)), true);
+  tick = await engine.runBackgroundOnce();
+  tick = await engine.runBackgroundOnce();
+  assert.equal(tick.workflow.status, "completed");
+  repository.close();
+}
+
+async function testWorkflowConcurrencyAndTimeout() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  let releaseSlowStep;
+  const slowStep = new Promise((resolve) => {
+    releaseSlowStep = resolve;
+  });
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    maxConcurrentWorkflows: 1,
+    workflowTimeoutMs: 1000,
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async () => [{ url: "https://slow.test/1", title: "Slow", snippet: "Slow" }],
+      fetchPage: async () => {
+        await slowStep;
+        return "<html><title>slow</title><body>slow research</body></html>";
+      }
+    })
+  });
+  const workflow = engine.createWorkflow({ template_id: "research-workflow", name: "Slow research", goal: "slow" });
+  engine.startWorkflow(workflow.id);
+  const firstTick = engine.tickWorkerAsync();
+  const busy = await engine.tickWorkerAsync();
+  assert.equal(busy.status, "busy");
+  releaseSlowStep();
+  await firstTick;
+
+  const timeoutRepository = createDatabaseRepository({ memory: true });
+  const timeoutApprovalQueue = createApprovalQueue(timeoutRepository);
+  const timeoutEngine = createWorkflowEngine({
+    repository: timeoutRepository,
+    approvalQueue: timeoutApprovalQueue,
+    appendTaskHistory: timeoutRepository.appendTaskHistory.bind(timeoutRepository),
+    createTask: timeoutRepository.createTask.bind(timeoutRepository),
+    workflowTimeoutMs: 1,
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue: timeoutApprovalQueue,
+      logAction: timeoutRepository.logAction.bind(timeoutRepository),
+      appendTaskHistory: timeoutRepository.appendTaskHistory.bind(timeoutRepository),
+      searchProvider: async () => [{ url: "https://timeout.test/1", title: "Timeout", snippet: "Timeout" }],
+      fetchPage: async () => new Promise((resolve) => setTimeout(() => resolve("<html><body>late</body></html>"), 20))
+    })
+  });
+  const timeoutWorkflow = timeoutEngine.createWorkflow({ template_id: "research-workflow", name: "Timeout research", goal: "timeout", retry_limit: 0 });
+  timeoutEngine.startWorkflow(timeoutWorkflow.id);
+  const timedOut = await timeoutEngine.tickWorkerAsync();
+  assert.equal(timedOut.status, "failed");
+  assert.match(timedOut.activeJob.error, /timed out/i);
+  repository.close();
+  timeoutRepository.close();
+}
+
+async function testResearchWorkflowCompletes() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const fetchAttempts = {};
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      fetchPage: async (url, attempt) => {
+        fetchAttempts[url] = attempt;
+        if (url.includes("/1") && attempt === 1) {
+          throw new Error("temporary fetch failure");
+        }
+        return `<html><title>${url} title</title><body>${url} useful research about AI agents, workflows, and automation.</body></html>`;
+      }
+    })
+  });
+  const workflow = engine.createWorkflow({
+    template_id: "research-workflow",
+    name: "Research AI agents",
+    goal: "AI agent workflow automation",
+    context: { topic: "AI agent workflow automation" }
+  });
+  engine.startWorkflow(workflow.id);
+  let tick = await engine.tickWorkerAsync();
+  tick = await engine.tickWorkerAsync();
+  tick = await engine.tickWorkerAsync();
+
+  assert.equal(tick.workflow.status, "completed");
+  assert.equal(tick.workflow.context.search.sources.length, 3);
+  assert.equal(Object.values(fetchAttempts).some((attempt) => attempt === 2), true);
+  const taskId = `workflow-${workflow.id}`;
+  const summaryPath = resolveWorkspacePath(taskId, "outputs", "research-summary.md").resolved;
+  const sourcesPath = resolveWorkspacePath(taskId, "outputs", "sources.json").resolved;
+  assert.equal(fs.existsSync(summaryPath), true);
+  assert.equal(fs.existsSync(sourcesPath), true);
+  assert.match(fs.readFileSync(summaryPath, "utf8"), /Research Summary/);
+  const sources = JSON.parse(fs.readFileSync(sourcesPath, "utf8"));
+  assert.equal(sources.sources.length, 3);
+  assert.equal(sources.sources[0].attempts, 2);
+  repository.close();
+}
+
+async function testContentEngineWorkflowCompletes() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  let scriptAttempts = 0;
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async (query, limit) => Array.from({ length: limit }, (_unused, index) => ({
+        url: `https://content.test/${index + 1}`,
+        title: `${query} source ${index + 1}`,
+        snippet: `${query} useful source ${index + 1}`
+      })),
+      fetchPage: async (url) => `<html><title>${url}</title><body>${url} has practical AI news and automation context.</body></html>`,
+      contentProvider: {
+        async generateScript(input) {
+          scriptAttempts += 1;
+          if (scriptAttempts === 1) throw new Error("temporary content generation failure");
+          return `# ${input.topic}\n\nGenerated after retry for ${input.format}.`;
+        }
+      }
+    })
+  });
+  assert.equal(engine.templates().some((template) => template.id === "youtube-video"), true);
+  assert.equal(engine.templates().find((template) => template.id === "youtube-video").steps.some((step) => step.target === "external_upload"), true);
+  assert.equal(engine.templates().find((template) => template.id === "twitter-thread").steps.some((step) => step.target === "social_posting"), true);
+
+  const workflow = engine.createWorkflow({
+    template_id: "ai-news-summary",
+    name: "AI News Package",
+    goal: "AI agent automation news",
+    context: { topic: "AI agent automation news" }
+  });
+  engine.startWorkflow(workflow.id);
+  let tick = await engine.tickWorkerAsync();
+  tick = await engine.tickWorkerAsync();
+
+  assert.equal(tick.workflow.status, "completed");
+  assert.equal(scriptAttempts, 2);
+  assert.equal(tick.workflow.context.content.metadata.tags.includes("terminalx"), true);
+  const taskId = `workflow-${workflow.id}`;
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "script.md").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "metadata.json").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "thumbnail-prompt.txt").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "generated-images/thumbnail.svg").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "content-package.json").resolved), true);
+  const metadata = JSON.parse(fs.readFileSync(resolveWorkspacePath(taskId, "outputs", "metadata.json").resolved, "utf8"));
+  assert.match(metadata.title, /AI Agent Automation News/i);
+  assert.equal(metadata.sources.length, 3);
+  repository.close();
+}
+
+async function testVoiceVideoPipelineCompletes() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  let voiceAttempts = 0;
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async (query, limit) => Array.from({ length: limit }, (_unused, index) => ({
+        url: `https://video.test/${index + 1}`,
+        title: `${query} video source ${index + 1}`,
+        snippet: `${query} video source ${index + 1}`
+      })),
+      fetchPage: async (url) => `<html><title>${url}</title><body>${url} faceless video research notes.</body></html>`,
+      mediaProvider: {
+        async generateVoice(input) {
+          voiceAttempts += 1;
+          if (voiceAttempts === 1) throw new Error("temporary voice failure");
+          return `MP3\nvoice retry ok\n${String(input.script).slice(0, 80)}`;
+        }
+      }
+    })
+  });
+  assert.equal(engine.templates().some((template) => template.id === "faceless-youtube-video"), true);
+  const workflow = engine.createWorkflow({
+    template_id: "faceless-youtube-video",
+    name: "Faceless AI Video",
+    goal: "AI tools for small business",
+    context: { topic: "AI tools for small business" }
+  });
+  engine.startWorkflow(workflow.id);
+  let tick = await engine.tickWorkerAsync();
+  tick = await engine.tickWorkerAsync();
+  tick = await engine.tickWorkerAsync();
+  tick = await engine.tickWorkerAsync();
+
+  assert.equal(tick.workflow.status, "waiting_approval");
+  assert.equal(voiceAttempts, 2);
+  assert.equal(tick.workflow.context.media.videoPackage.status, "exported");
+  const taskId = `workflow-${workflow.id}`;
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "narration.mp3").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "subtitles.srt").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "video-package.json").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "final-video.mp4").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "render-logs.txt").resolved), true);
+  assert.match(fs.readFileSync(resolveWorkspacePath(taskId, "outputs", "subtitles.srt").resolved, "utf8"), /-->/);
+  assert.equal(approvalQueue.list({ status: "pending" }).some((approval) => approval.approvalType === "external_upload"), true);
+  repository.close();
+}
+
+async function testGithubDeploymentToolsAndWorkflow() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const calls = [];
+  let deployAttempts = 0;
+  const githubProvider = {
+    async createRepo(input) {
+      calls.push("createRepo");
+      return { repo: input.name, repoUrl: `https://github.com/terminalx/${input.name}` };
+    },
+    async writeFiles(input) {
+      calls.push("writeFiles");
+      return { repo: input.repo, writtenFiles: input.files.length };
+    },
+    async commit() {
+      calls.push("commit");
+      return { commitSha: "abc123" };
+    },
+    async push(input) {
+      calls.push("push");
+      return { repoUrl: input.repoUrl || `https://github.com/terminalx/${input.repo}` };
+    }
+  };
+  const deploymentProvider = {
+    async deploy(input) {
+      deployAttempts += 1;
+      calls.push(`deploy-${deployAttempts}`);
+      if (deployAttempts === 1) throw new Error("temporary deploy failure");
+      return {
+        deploymentId: "dep_123",
+        deploymentUrl: "https://terminalx-test.vercel.app",
+        logs: ["deploy started", "deploy ready"]
+      };
+    },
+    async status() {
+      calls.push("status");
+      return { status: "ready", deploymentUrl: "https://terminalx-test.vercel.app" };
+    }
+  };
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    executeCodingTask: codingAgent.executeAssignedTask,
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      githubProvider,
+      deploymentProvider
+    })
+  });
+
+  const workflow = engine.createWorkflow({ template_id: "deploy-app", name: "Deploy Todo", goal: "create todo app" });
+  engine.startWorkflow(workflow.id);
+  engine.tickWorker();
+  let tick = engine.tickWorker();
+  const buildTask = repository.listTasks().find((task) => task.metadata?.workflow_id === workflow.id);
+  const buildApproval = approvalQueue.list({ status: "pending" }).find((approval) => approval.taskId === buildTask.id);
+  approvalQueue.decide(buildApproval.id, "approved", "test");
+  const buildResult = await codingAgent.completeApprovedTask({
+    task: buildTask,
+    approval: buildApproval,
+    toolRegistry: createToolRegistry({
+      taskId: buildTask.id,
+      agentId: "coding-agent",
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository)
+    }),
+    storeFile: async (filePayload) => repository.upsertFile({
+      id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      task_id: filePayload.task_id,
+      filename: filePayload.filename,
+      path: filePayload.path,
+      mime_type: filePayload.mime_type,
+      size_bytes: Buffer.byteLength(filePayload.content || ""),
+      provider: "local",
+      bucket: "local",
+      onlineConfigured: false,
+      metadata: filePayload.metadata || {}
+    })
+  });
+  engine.resumeCodingTask(buildTask, buildResult);
+  tick = await engine.tickWorkerAsync();
+  assert.equal(tick.workflow.status, "waiting_approval");
+  const releaseApproval = approvalQueue.list({ status: "pending" }).find((approval) => approval.proposedAction?.workflow_id === workflow.id);
+  assert.ok(releaseApproval);
+  const approvedRelease = approvalQueue.decide(releaseApproval.id, "approved", "test");
+  engine.resumeApproval(approvedRelease);
+  for (let index = 0; index < 6; index += 1) {
+    tick = await engine.tickWorkerAsync();
+    if (tick.workflow?.status === "completed") break;
+  }
+  const finalWorkflow = tick.workflow || engine.getWorkflow(workflow.id);
+  assert.equal(finalWorkflow.status, "completed");
+  assert.equal(finalWorkflow.context.repo.repoUrl, "https://github.com/terminalx/deploy-todo");
+  assert.equal(finalWorkflow.context.deploy.deploymentUrl, "https://terminalx-test.vercel.app");
+  assert.equal(finalWorkflow.context.deploy.attempts, 2);
+  assert.equal(finalWorkflow.context.status.status, "ready");
+  assert.deepEqual(calls, ["createRepo", "writeFiles", "commit", "push", "deploy-1", "deploy-2", "status"]);
+  repository.close();
+}
+
+async function testBrowserAutomationLayer() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const taskId = "browser_test_task";
+  let openAttempts = 0;
+  const browserProvider = {
+    async open(input) {
+      openAttempts += 1;
+      if (openAttempts === 1) throw new Error("temporary browser failure");
+      return { url: input.url, title: "Example Page" };
+    },
+    async click(input) {
+      return { selector: input.selector };
+    },
+    async type(input) {
+      return { selector: input.selector, length: input.text.length };
+    },
+    async screenshot() {
+      return { content: "screenshot-bytes" };
+    },
+    async extractText() {
+      return { text: "Example Page\nUseful extracted browser text." };
+    },
+    async close(input) {
+      return { sessionId: input.sessionId };
+    }
+  };
+  const registry = createToolRegistry({
+    taskId,
+    agentId: "browser-agent",
+    approvalQueue,
+    logAction: repository.logAction.bind(repository),
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    browserProvider
+  });
+
+  const opened = await registry.execute("browser-open", { url: "https://example.test", sessionId: "s1", retries: 2 });
+  assert.equal(opened.status, "opened");
+  assert.equal(opened.attempts, 2);
+  const extracted = await registry.execute("browser-extract-text", { sessionId: "s1", filename: "browser-text.txt" });
+  assert.match(extracted.text, /Useful extracted/);
+  const screenshot = await registry.execute("browser-screenshot", { sessionId: "s1", filename: "shot.txt" });
+  assert.equal(screenshot.status, "captured");
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "browser-text.txt").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "shot.txt").resolved), true);
+  await assert.rejects(
+    () => registry.execute("browser-click", { sessionId: "s1", selector: "button[type=submit]" }),
+    /requires human\/admin approval/i
+  );
+  const approval = approvalQueue.add({ title: "Approve submit click", approvalType: "browser_action", riskLevel: "high", requestedBy: "browser-agent" });
+  approvalQueue.decide(approval.id, "approved", "test");
+  assert.equal((await registry.execute("browser-click", { sessionId: "s1", selector: "button[type=submit]", approvalId: approval.id })).status, "clicked");
+  await registry.execute("browser-close", { sessionId: "s1" });
+  repository.close();
+}
+
+async function testBrowserWorkflowCompletes() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      browserProvider: {
+        async open(input) { return { url: input.url, title: "Workflow Page" }; },
+        async screenshot() { return { content: "workflow-shot" }; },
+        async extractText() { return { text: "Workflow extracted text" }; },
+        async close(input) { return { sessionId: input.sessionId }; }
+      }
+    })
+  });
+  const workflow = engine.createWorkflow({ template_id: "browser-workflow", name: "Browse Example", goal: "https://example.test" });
+  engine.startWorkflow(workflow.id);
+  const tick = await engine.tickWorkerAsync();
+  assert.equal(tick.workflow.status, "completed");
+  const taskId = `workflow-${workflow.id}`;
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "browser-screenshot.txt").resolved), true);
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "outputs", "browser-text.txt").resolved), true);
+  assert.match(tick.workflow.context.browse.extracted.text, /Workflow extracted/);
   repository.close();
 }
 
@@ -891,10 +1648,20 @@ async function testRbacHttpFlow() {
       headers: adminHeaders,
       body: JSON.stringify({ command: "create simple calculator app" })
     });
-    assert.equal(buildResult.response.status, 201);
-    assert.equal(buildResult.body.status, "waiting_approval");
+    assert.equal(buildResult.response.status, 202);
+    assert.equal(buildResult.body.status, "queued");
+    await request(baseUrl, "/api/workflows/worker/tick", {
+      method: "POST",
+      headers: adminHeaders,
+      body: "{}"
+    });
+    await request(baseUrl, "/api/workflows/worker/tick", {
+      method: "POST",
+      headers: adminHeaders,
+      body: "{}"
+    });
     const pendingApprovals = await request(baseUrl, "/api/approvals?status=pending", { headers: adminHeaders });
-    const calculatorApproval = pendingApprovals.body.approvals.find((approval) => /Build Simple Calculator/i.test(approval.title));
+    const calculatorApproval = pendingApprovals.body.approvals.find((approval) => approval.approvalType === "repo_modification");
     assert.ok(calculatorApproval, "Calculator approval should be visible to the admin.");
     assert.equal(calculatorApproval.requestedBy, "coding-agent");
     assert.equal(calculatorApproval.proposedAction.proposedFiles.length, 3);
@@ -938,7 +1705,7 @@ async function testRbacHttpFlow() {
       headers: adminHeaders,
       body: "{}"
     });
-    assert.equal(runWorkflow.response.status, 200);
+    assert.equal(runWorkflow.response.status, 202);
     const workerTick = await request(baseUrl, "/api/workflows/worker/tick", {
       method: "POST",
       headers: adminHeaders,
@@ -1011,12 +1778,28 @@ async function main() {
   testRiskPolicy();
   await testCeoCreatesCodingBuildTask();
   await testChatEscalatesActionRequests();
+  await testAutomaticExecutionClassificationAndQuickQuery();
+  await testRoutingNarrationNeverAppears();
+  await testFailedQuickQueryReturnsConciseError();
+  await testResearchRequestQueuesWorkflow();
   testRuntimeModes();
   testDatabaseRepository();
   testPostgresRepositoryInterface();
   await testFileStorageProviders();
   await testExecutionWorkspaceTools();
+  await testDynamicCodingGeneration();
+  await testCodingAgentSelfFixLoop();
+  await testCodingAgentRetryLimitEnforced();
   testWorkflowEngine();
+  await testWorkflowCodingApprovalResume();
+  await testAsyncWorkflowBackgroundExecution();
+  await testWorkflowConcurrencyAndTimeout();
+  await testResearchWorkflowCompletes();
+  await testContentEngineWorkflowCompletes();
+  await testVoiceVideoPipelineCompletes();
+  await testGithubDeploymentToolsAndWorkflow();
+  await testBrowserAutomationLayer();
+  await testBrowserWorkflowCompletes();
   await testAiProviders();
   await testAgentOrchestrator();
   await testChatAgentUsesLlmProvider();

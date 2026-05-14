@@ -6,7 +6,7 @@ const { loadEnvFile } = require("./utils/env");
 const { createDatabaseRepository } = require("../../../packages/db/client");
 const { agentRegistry } = require("../../agent-runtime/src/agents/registry");
 const { handleCommandWithAi } = require("../../agent-runtime/src/agents/ceo-agent");
-const { buildStatusReportForMessage, createChatAgent, searchTasks } = require("../../agent-runtime/src/agents/chat-agent");
+const { buildStatusReportForMessage, classifyExecutionRequest, createChatAgent, searchTasks } = require("../../agent-runtime/src/agents/chat-agent");
 const { createAgentOrchestrator } = require("../../agent-runtime/src/agents/orchestrator");
 const contentAgent = require("../../agent-runtime/src/agents/content-agent");
 const codingAgent = require("../../agent-runtime/src/agents/coding-agent");
@@ -77,8 +77,26 @@ const workflowEngine = createWorkflowEngine({
   repository: database,
   approvalQueue,
   appendTaskHistory,
-  createTask
+  createTask,
+  executeCodingTask: codingAgent.executeAssignedTask,
+  toolRegistryFactory: taskToolRegistry,
+  workflowTimeoutMs: Number(process.env.WORKFLOW_TIMEOUT_MS || 30000),
+  maxConcurrentWorkflows: Number(process.env.WORKFLOW_MAX_CONCURRENT || 1)
 });
+let workflowPumpRunning = false;
+async function pumpWorkflowWorker() {
+  if (workflowPumpRunning) return;
+  workflowPumpRunning = true;
+  try {
+    await workflowEngine.runBackgroundOnce();
+  } catch (error) {
+    database.logAction?.("workflow.worker_error", { message: error.message }, "workflow-engine");
+  } finally {
+    workflowPumpRunning = false;
+  }
+}
+const workflowWorkerInterval = setInterval(pumpWorkflowWorker, Number(process.env.WORKFLOW_POLL_MS || 1000));
+workflowWorkerInterval.unref?.();
 function taskToolRegistry(taskId, agentId = "coding-agent") {
   return createToolRegistry({
     taskId,
@@ -88,27 +106,117 @@ function taskToolRegistry(taskId, agentId = "coding-agent") {
     appendTaskHistory: database.appendTaskHistory?.bind(database)
   });
 }
+
+function formatQuickQueryAnswer(message, summary, sources = []) {
+  const cleanSummary = String(summary?.summary || "").replace(/^# Research Summary\s*/i, "").trim();
+  const sourceLines = sources.slice(0, 3).map((source) => `- ${source.title || source.url}: ${source.url}`);
+  return [
+    cleanSummary || `No usable research summary was produced for: ${message}`,
+    sourceLines.length ? "" : null,
+    sourceLines.length ? "Sources:" : null,
+    ...sourceLines
+  ].filter(Boolean).join("\n");
+}
+
+async function executeQuickQuery({ message }) {
+  const registry = createToolRegistry({
+    agentId: "research-agent",
+    logAction: database.logAction?.bind(database)
+  });
+
+  try {
+    const search = await registry.execute("web-search", { query: message, limit: 3 });
+    const documents = [];
+    for (const source of search.results || []) {
+      const fetched = await registry.execute("page-fetch", { url: source.url, retries: 1 });
+      if (fetched.status === "failed") continue;
+      const extracted = await registry.execute("text-extract", {
+        url: fetched.url,
+        title: fetched.title || source.title,
+        html: fetched.html
+      });
+      documents.push({
+        url: extracted.url,
+        title: extracted.title,
+        text: extracted.text
+      });
+    }
+    const summary = await registry.execute("summarize-content", { query: message, documents });
+    return {
+      status: "completed",
+      response: formatQuickQueryAnswer(message, summary, search.results || []),
+      sources: search.results || []
+    };
+  } catch (error) {
+    return {
+      status: "failed",
+      response: `Execution error: ${error.message}`,
+      sources: []
+    };
+  }
+}
+
+function workflowTemplateForExecution(command, executionClass) {
+  const normalized = String(command || "").toLowerCase();
+  if (executionClass === "deployment_task") return "deploy-app";
+  if (executionClass === "browser_task") return "browser-workflow";
+  if (/\bfaceless video|youtube video\b/i.test(normalized)) return "faceless-youtube-video";
+  if (/\bblog\b/i.test(normalized)) return "blog-article";
+  if (/\btwitter|thread\b/i.test(normalized)) return "twitter-thread";
+  if (/\binstagram|reel\b/i.test(normalized)) return "instagram-reel-plan";
+  if (executionClass === "research_task") return "research-workflow";
+  if (/\bapp|api|website|saas|code|build|implement\b/i.test(normalized)) return "app-builder";
+  return "ai-news-summary";
+}
+
+function startAutonomousWorkflow({ command, executionClass }) {
+  const resolvedClass = executionClass || classifyExecutionRequest(command);
+  const workflow = workflowEngine.createWorkflow({
+    template_id: workflowTemplateForExecution(command, resolvedClass),
+    name: String(command || "TerminalX workflow").slice(0, 80),
+    goal: command,
+    context: { topic: command, command }
+  });
+  const started = workflowEngine.startWorkflow(workflow.id);
+  pumpWorkflowWorker();
+  return {
+    selected_agent: agentRegistry.find((agent) => agent.type === "ceo"),
+    status: "queued",
+    response: "Workflow running in background.",
+    approval_required: false,
+    workflow_id: workflow.id,
+    workflow: started.workflow,
+    job: started.job,
+    execution_class: resolvedClass
+  };
+}
+
 let agentOrchestrator;
 const chatAgent = createChatAgent({
   conversationRepository: database,
   storageService,
   findTask,
   llmProvider,
+  executeQuickQuery,
   getSystemStatus: () => ({
     agents: agentRegistry,
     tasks: database.listTasks(),
     approvals: approvalQueue.list({ status: "pending" }),
     files: database.listFiles ? database.listFiles() : []
   }),
-  orchestrateAction: ({ command, executionMode }) =>
-    handleCommandWithAi({
+  orchestrateAction: ({ command, executionMode, executionClass }) => {
+    if (executionMode !== "plan") {
+      return startAutonomousWorkflow({ command, executionClass });
+    }
+    return handleCommandWithAi({
       command,
       createTask,
       approvalQueue,
       llmProvider: null,
       orchestrator: agentOrchestrator,
       executionMode
-    })
+    });
+  }
 });
 agentOrchestrator = createAgentOrchestrator({
   repository: database,
@@ -192,6 +300,10 @@ async function resumeApprovedWorkflow(approval, decidedBy = "user") {
       test_result: result.test_result,
       next_action: result.status === "completed" ? "Open the Files page to review generated files." : "Review execution logs and ask Coding Agent to fix the failure."
     });
+    const resumedWorkflow = workflowEngine.resumeCodingTask(task, result);
+    if (resumedWorkflow && !["completed", "failed", "waiting_approval"].includes(resumedWorkflow.status)) {
+      workflowEngine.tickWorker();
+    }
     return result;
   } catch (error) {
     database.appendTaskHistory(task.id, "coding.failed", {
@@ -404,7 +516,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/workflows/worker/tick") {
     if (!requirePermission(req, res, "agents:execute")) return;
-    return sendJson(res, 200, workflowEngine.tickWorker());
+    return sendJson(res, 200, await workflowEngine.tickWorkerAsync());
   }
 
   if (req.method === "GET" && url.pathname === "/api/workflows") {
@@ -421,7 +533,13 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname.match(/^\/api\/workflows\/[^/]+\/run$/)) {
     if (!requirePermission(req, res, "agents:execute")) return;
     const workflowId = url.pathname.split("/")[3];
-    return sendJson(res, 200, workflowEngine.startWorkflow(workflowId));
+    const started = workflowEngine.startWorkflow(workflowId);
+    pumpWorkflowWorker();
+    return sendJson(res, 202, {
+      ...started,
+      status: "queued",
+      message: "Workflow queued. Background worker will continue execution."
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/bots") {
@@ -542,6 +660,22 @@ async function handleApi(req, res, url) {
         task_status: statusReport.kind === "task_status" ? statusReport.task : null
       });
     }
+    const executionClass = classifyExecutionRequest(payload.command);
+    if (executionClass === "quick_query") {
+      const quickResult = await executeQuickQuery({ message: payload.command });
+      return sendJson(res, 200, {
+        selected_agent: agentRegistry.find((agent) => agent.type === "ceo"),
+        task_id: null,
+        status: quickResult.status,
+        response: quickResult.response,
+        approval_required: false,
+        execution_class: executionClass,
+        sources: quickResult.sources
+      });
+    }
+    if (executionClass !== "none" && (payload.execution_mode || payload.executionMode || "execution") !== "plan") {
+      return sendJson(res, 202, startAutonomousWorkflow({ command: payload.command, executionClass }));
+    }
     const result = await handleCommandWithAi({
       command: payload.command,
       createTask,
@@ -618,7 +752,13 @@ async function handleApi(req, res, url) {
     const decidedBy = req.currentUser?.email || payload.decidedBy || "user";
     const approval = approvalQueue.decide(approvalId, "approved", decidedBy);
     if (!approval) return notFound(res);
-    const resumed = await resumeApprovedWorkflow(approval, decidedBy);
+    let resumed = await resumeApprovedWorkflow(approval, decidedBy);
+    if (!resumed && approval.proposedAction?.workflow_id) {
+      resumed = workflowEngine.resumeApproval(approval);
+      if (resumed) {
+        resumed = await workflowEngine.tickWorkerAsync();
+      }
+    }
     return sendJson(res, 200, { approval, resumed });
   }
 
