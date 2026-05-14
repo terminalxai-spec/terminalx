@@ -383,7 +383,8 @@ function renderApprovalBanner(task) {
 
 function renderWhereIsMyApp(task) {
   const approval = taskApproval(task);
-  const directory = task.metadata?.generated_directory || "terminalx-generated/calculator/";
+  const workspace = task.metadata?.workspace || task.metadata?.execution_workspace || taskApproval(task)?.proposedAction?.workspace || "";
+  const directory = task.metadata?.generated_directory || (workspace ? `${workspace}/files/` : "terminalx-generated/calculator/");
   const files = task.metadata?.generated_files || [];
   return `
     <div class="where-panel">
@@ -1495,6 +1496,10 @@ function renderTaskDrawer(task) {
         <strong>Current status</strong>
         <p>${escapeHtml(taskApproval(task) ? "waiting_approval" : task.status)}</p>
       </section>
+      <section class="detail-section">
+        <strong>Workspace path</strong>
+        <p>${escapeHtml(task.metadata?.workspace || taskApproval(task)?.proposedAction?.workspace || "Workspace will be created when the agent runs.")}</p>
+      </section>
       <div>
         <strong>Requirements</strong>
         <ul>${(task.metadata?.requirements || ["No structured requirements yet."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
@@ -1526,6 +1531,10 @@ function renderTaskDrawer(task) {
       <section class="detail-section">
         <strong>Next action</strong>
         <p>${escapeHtml(nextActionText(task))}</p>
+        <div class="button-row">
+          <button type="button" data-page-shortcut="files">Open/download output</button>
+          <button type="button" data-page-shortcut="approvals">Review approval</button>
+        </div>
       </section>
     </div>
   `;

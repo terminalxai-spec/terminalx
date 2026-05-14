@@ -13,6 +13,8 @@ const { createDatabaseRepository, migrateSqlite, PostgresRepository } = require(
 const { GroqProvider, OllamaProvider, createLlmProvider, parseIntentFromText } = require("../services/agent-runtime/src/llm/provider");
 const { createApprovalQueue } = require("../services/agent-runtime/src/approvals/queue");
 const { createStorageService } = require("../services/file-service/src/storage");
+const { createToolRegistry } = require("../services/agent-runtime/src/tools/tool-registry");
+const { resolveWorkspacePath } = require("../services/agent-runtime/src/workspace/execution-workspace");
 const {
   createSessionToken,
   hashPassword,
@@ -453,6 +455,52 @@ async function testFileStorageProviders() {
   repository.close();
 }
 
+async function testExecutionWorkspaceTools() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const task = repository.createTask({
+    title: "Workspace calculator",
+    assignedAgentId: "coding-agent",
+    status: "waiting_approval",
+    intent: "coding"
+  });
+  assert.throws(() => resolveWorkspacePath(task.id, "files", "../escape.txt"), /escape blocked/i);
+
+  const registry = createToolRegistry({
+    taskId: task.id,
+    agentId: "coding-agent",
+    approvalQueue,
+    logAction: repository.logAction.bind(repository),
+    appendTaskHistory: repository.appendTaskHistory.bind(repository)
+  });
+  await assert.rejects(
+    () => registry.execute("file-create", {
+      taskId: task.id,
+      path: "calculator/index.js",
+      content: "console.log('hello')"
+    }),
+    /requires human\/admin approval/i
+  );
+  const approval = approvalQueue.add({
+    taskId: task.id,
+    title: "Approve workspace write",
+    approvalType: "repo_modification",
+    riskLevel: "medium",
+    requestedBy: "coding-agent",
+    proposedAction: { proposedFiles: [{ path: "calculator/index.js" }] }
+  });
+  approvalQueue.decide(approval.id, "approved", "test");
+  const created = await registry.execute("file-create", {
+    taskId: task.id,
+    path: "calculator/index.js",
+    content: "console.log('hello')",
+    approvalId: approval.id
+  });
+  assert.equal(created.status, "created");
+  assert.equal(registry.listWorkspaceFiles(task.id).some((file) => file.path === "calculator/index.js"), true);
+  repository.close();
+}
+
 async function testAiProviders() {
   const previousProvider = process.env.LLM_PROVIDER;
   const previousOpenAiKey = process.env.OPENAI_API_KEY;
@@ -824,6 +872,13 @@ async function testRbacHttpFlow() {
     assert.equal(calculatorSearch.body.tasks[0].status, "completed");
     const generatedFiles = await request(baseUrl, `/api/files?task_id=${calculatorSearch.body.tasks[0].id}`, { headers: adminHeaders });
     assert.equal(generatedFiles.body.files.length >= 3, true);
+    const workspace = await request(baseUrl, `/api/workspaces/${calculatorSearch.body.tasks[0].id}`, { headers: adminHeaders });
+    assert.equal(workspace.response.status, 200);
+    assert.match(workspace.body.workspace.path, /storage\/workspaces\/projects/);
+    const workspaceFiles = await request(baseUrl, `/api/workspaces/${calculatorSearch.body.tasks[0].id}/files`, { headers: adminHeaders });
+    assert.equal(workspaceFiles.body.files.some((file) => /calculator\.js$/.test(file.path)), true);
+    const workspaceLogs = await request(baseUrl, `/api/workspaces/${calculatorSearch.body.tasks[0].id}/logs`, { headers: adminHeaders });
+    assert.equal(workspaceLogs.response.status, 200);
 
     const viewerEmail = `viewer-${Date.now()}@terminalx.local`;
     const viewerRegister = await request(baseUrl, "/api/auth/register", {
@@ -892,6 +947,7 @@ async function main() {
   testDatabaseRepository();
   testPostgresRepositoryInterface();
   await testFileStorageProviders();
+  await testExecutionWorkspaceTools();
   await testAiProviders();
   await testAgentOrchestrator();
   await testChatAgentUsesLlmProvider();

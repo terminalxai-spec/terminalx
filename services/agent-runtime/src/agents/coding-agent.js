@@ -9,6 +9,7 @@ const {
 } = require("../tools/file-tool");
 const { runCommand } = require("../tools/command-tool");
 const { getGitHubPlaceholder } = require("../integrations/github-placeholder");
+const { createTaskWorkspace } = require("../workspace/execution-workspace");
 
 function codingWorkspaceRoot() {
   return path.resolve(process.env.TERMINALX_WORKSPACE_ROOT || process.cwd());
@@ -70,6 +71,7 @@ function proposedFilesForTask(task, command) {
 
 function executeAssignedTask({ task, command, approvalQueue }) {
   const proposedFiles = proposedFilesForTask(task, command);
+  const workspace = createTaskWorkspace(task);
   const approval = approvalQueue?.add?.({
     title: `Approve Coding Agent file generation for ${task.title}`,
     taskId: task.id,
@@ -80,6 +82,7 @@ function executeAssignedTask({ task, command, approvalQueue }) {
     description: "Coding Agent prepared a file-generation workflow. Approval is required before writing files.",
     proposedAction: {
       command,
+      workspace: workspace.relativeRoot,
       proposedFiles,
       requirements: task.metadata?.requirements || []
     }
@@ -95,12 +98,14 @@ function executeAssignedTask({ task, command, approvalQueue }) {
       ? "Coding Agent analyzed the task and prepared file changes. Approval is required before writing to the workspace."
       : "Coding Agent analyzed the task and prepared an implementation plan.",
     logs: [
+      `Workspace prepared: ${workspace.relativeRoot}`,
       "Coding Agent received assigned task",
       "Requirements parsed",
       "Implementation files planned",
       approval ? "Approval requested for repo modification" : "No approval queue available"
     ],
-    proposed_files: proposedFiles
+    proposed_files: proposedFiles,
+    workspace: workspace.relativeRoot
   };
 }
 
@@ -194,13 +199,20 @@ Purpose: ${file.purpose || "Task artifact"}
 `;
 }
 
-async function completeApprovedTask({ task, approval, storeFile }) {
+async function completeApprovedTask({ task, approval, storeFile, toolRegistry }) {
   const proposedFiles = approval?.proposedAction?.proposedFiles || [];
+  const workspace = createTaskWorkspace(task);
   const createdFiles = [];
   const logs = ["Approval received", "Creating files"];
 
   for (const file of proposedFiles) {
     const content = fileContentForTask(file, task, approval);
+    const workspaceWrite = await toolRegistry.execute("file-create", {
+      taskId: task.id,
+      path: file.path,
+      content,
+      approvalId: approval.id
+    });
     const stored = await storeFile({
       filename: file.path.split(/[\\/]/).pop(),
       path: file.path,
@@ -216,22 +228,39 @@ async function completeApprovedTask({ task, approval, storeFile }) {
     createdFiles.push({
       path: file.path,
       file_id: stored.id,
+      workspace_path: workspaceWrite.path,
       purpose: file.purpose || ""
     });
   }
 
   logs.push("Files created");
   logs.push("Running tests");
-  logs.push("Task completed");
+  const testFile = proposedFiles.find((file) => /\.test\.js$/i.test(file.path))?.path;
+  const testResult = testFile
+    ? await toolRegistry.execute("test-run", {
+        taskId: task.id,
+        testFile,
+        approvalId: approval.id
+      })
+    : { status: "no_tests_found", stdout: "", stderr: "" };
+  logs.push(testResult.status === "passed" ? "Tests passed" : "Tests failed");
+  await toolRegistry.execute("output-save", {
+    taskId: task.id,
+    filename: "result.json",
+    content: JSON.stringify({ files: createdFiles, testResult }, null, 2)
+  });
+  logs.push(testResult.status === "passed" ? "Task completed" : "Task failed");
 
   return {
     agent: "coding-agent",
     action: "complete_approved_task",
-    status: "completed",
+    status: testResult.status === "passed" || testResult.status === "no_tests_found" ? "completed" : "failed",
     response: `Coding Agent created ${createdFiles.length} approved file(s).`,
     logs,
+    workspace: workspace.relativeRoot,
     generated_directory: proposedFiles[0]?.path?.split("/").slice(0, -1).join("/") || "terminalx-generated/",
-    files: createdFiles
+    files: createdFiles,
+    test_result: testResult
   };
 }
 

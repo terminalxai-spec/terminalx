@@ -16,6 +16,8 @@ const { permissionModes } = require("../../agent-runtime/src/permissions/modes")
 const { createApprovalQueue } = require("../../agent-runtime/src/approvals/queue");
 const { getRuntimeConfig } = require("../../agent-runtime/src/config/runtime");
 const { createLlmProvider } = require("../../agent-runtime/src/llm/provider");
+const { createToolRegistry } = require("../../agent-runtime/src/tools/tool-registry");
+const { createTaskWorkspace, listWorkspaceFiles, listWorkspaceLogs } = require("../../agent-runtime/src/workspace/execution-workspace");
 const { createStorageService } = require("../../file-service/src/storage");
 const { hasPermission, seedRbac } = require("./rbac");
 const {
@@ -70,6 +72,15 @@ const storageService = createStorageService({
   appendTaskHistory
 });
 const llmProvider = createLlmProvider();
+function taskToolRegistry(taskId, agentId = "coding-agent") {
+  return createToolRegistry({
+    taskId,
+    agentId,
+    approvalQueue,
+    logAction: database.logAction?.bind(database),
+    appendTaskHistory: database.appendTaskHistory?.bind(database)
+  });
+}
 let agentOrchestrator;
 const chatAgent = createChatAgent({
   conversationRepository: database,
@@ -141,7 +152,8 @@ async function resumeApprovedWorkflow(approval, decidedBy = "user") {
   });
   database.updateTaskStatus(task.id, "running", {
     approval_id: approval.id,
-    next_action: "Coding Agent is creating approved files."
+    next_action: "Coding Agent is creating approved files.",
+    workspace: createTaskWorkspace(task).relativeRoot
   });
   database.appendTaskHistory(task.id, "coding.creating_files", {
     message: "Creating files",
@@ -152,6 +164,7 @@ async function resumeApprovedWorkflow(approval, decidedBy = "user") {
     const result = await codingAgent.completeApprovedTask({
       task: database.findTask(task.id),
       approval,
+      toolRegistry: taskToolRegistry(task.id, "coding-agent"),
       storeFile: (filePayload) => storageService.upload(filePayload)
     });
     database.appendTaskHistory(task.id, "coding.files_created", {
@@ -159,16 +172,18 @@ async function resumeApprovedWorkflow(approval, decidedBy = "user") {
       files: result.files,
       generated_directory: result.generated_directory
     });
-    database.appendTaskHistory(task.id, "testing.completed", {
+    database.appendTaskHistory(task.id, result.test_result?.status === "passed" ? "testing.passed" : "testing.failed", {
       message: "Running tests",
-      result: "Generated calculator smoke tests were prepared with the files."
+      result: result.test_result
     });
-    database.appendTaskHistory(task.id, "task.completed", result);
-    database.updateTaskStatus(task.id, "completed", {
+    database.appendTaskHistory(task.id, result.status === "completed" ? "task.completed" : "task.failed", result);
+    database.updateTaskStatus(task.id, result.status, {
       latest_output: result.response,
+      workspace: result.workspace,
       generated_directory: result.generated_directory,
       generated_files: result.files,
-      next_action: "Open the Files page to review generated files."
+      test_result: result.test_result,
+      next_action: result.status === "completed" ? "Open the Files page to review generated files." : "Review execution logs and ask Coding Agent to fix the failure."
     });
     return result;
   } catch (error) {
@@ -191,6 +206,7 @@ function isProtectedPath(url) {
     "/api/tasks",
     "/api/approvals",
     "/api/files",
+    "/api/workspaces",
     "/api/command",
     "/api/chat",
     "/api/action-log"
@@ -379,6 +395,59 @@ async function handleApi(req, res, url) {
     if (!requirePermission(req, res, "tasks:create")) return;
     const payload = await readJsonBody(req);
     return sendJson(res, 201, { task: createTask(payload) });
+  }
+
+  if (req.method === "GET" && url.pathname.match(/^\/api\/workspaces\/[^/]+$/)) {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    const taskId = url.pathname.split("/")[3];
+    const task = database.findTask(taskId);
+    if (!task) return notFound(res);
+    const workspace = createTaskWorkspace(task);
+    return sendJson(res, 200, {
+      task_id: taskId,
+      workspace: {
+        path: workspace.relativeRoot,
+        files_path: `${workspace.relativeRoot}/files`,
+        logs_path: `${workspace.relativeRoot}/logs`,
+        outputs_path: `${workspace.relativeRoot}/outputs`
+      }
+    });
+  }
+
+  if (req.method === "GET" && url.pathname.match(/^\/api\/workspaces\/[^/]+\/files$/)) {
+    if (!requirePermission(req, res, "files:read")) return;
+    const taskId = url.pathname.split("/")[3];
+    return database.findTask(taskId) ? sendJson(res, 200, { files: listWorkspaceFiles(taskId) }) : notFound(res);
+  }
+
+  if (req.method === "GET" && url.pathname.match(/^\/api\/workspaces\/[^/]+\/logs$/)) {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    const taskId = url.pathname.split("/")[3];
+    return database.findTask(taskId) ? sendJson(res, 200, { logs: listWorkspaceLogs(taskId) }) : notFound(res);
+  }
+
+  if (req.method === "POST" && url.pathname.match(/^\/api\/tasks\/[^/]+\/run$/)) {
+    if (!requirePermission(req, res, "agents:execute")) return;
+    const taskId = url.pathname.split("/")[3];
+    const task = database.findTask(taskId);
+    if (!task) return notFound(res);
+    const agent = agentRegistry.find((entry) => entry.id === task.assignedAgentId) || agentRegistry.find((entry) => entry.type === "coding");
+    const result = await agentOrchestrator.execute({
+      taskId,
+      agent,
+      command: task.description || task.title
+    });
+    return sendJson(res, 200, result);
+  }
+
+  if (req.method === "POST" && url.pathname.match(/^\/api\/tasks\/[^/]+\/resume$/)) {
+    if (!requirePermission(req, res, "agents:execute")) return;
+    const taskId = url.pathname.split("/")[3];
+    const approval = approvalQueue.list({ status: "approved" }).find((entry) => entry.taskId === taskId);
+    if (!approval) {
+      return sendJson(res, 409, { error: "approval_required", message: "Approve the pending action before resuming this task." });
+    }
+    return sendJson(res, 200, { resumed: await resumeApprovedWorkflow(approval, req.currentUser?.email || "user") });
   }
 
   if (req.method === "POST" && url.pathname === "/api/command") {
