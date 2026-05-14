@@ -150,7 +150,9 @@ function createAgentOrchestrator({ repository, approvalQueue, chatAgent, workspa
 
       if (requiresApproval(result)) {
         updateStatus(repository, task.id, TASK_STATUSES.WAITING_APPROVAL, {
-          approval_id: latestApprovalId(result)
+          approval_id: latestApprovalId(result),
+          latest_output: preview(result),
+          next_action: "Approval required before the assigned agent can continue."
         });
         return {
           status: TASK_STATUSES.WAITING_APPROVAL,

@@ -6,7 +6,7 @@ const { loadEnvFile } = require("./utils/env");
 const { createDatabaseRepository } = require("../../../packages/db/client");
 const { agentRegistry } = require("../../agent-runtime/src/agents/registry");
 const { handleCommandWithAi } = require("../../agent-runtime/src/agents/ceo-agent");
-const { createChatAgent } = require("../../agent-runtime/src/agents/chat-agent");
+const { buildStatusReportForMessage, createChatAgent, searchTasks } = require("../../agent-runtime/src/agents/chat-agent");
 const { createAgentOrchestrator } = require("../../agent-runtime/src/agents/orchestrator");
 const contentAgent = require("../../agent-runtime/src/agents/content-agent");
 const codingAgent = require("../../agent-runtime/src/agents/coding-agent");
@@ -79,7 +79,8 @@ const chatAgent = createChatAgent({
   getSystemStatus: () => ({
     agents: agentRegistry,
     tasks: database.listTasks(),
-    approvals: approvalQueue.list({ status: "pending" })
+    approvals: approvalQueue.list({ status: "pending" }),
+    files: database.listFiles ? database.listFiles() : []
   }),
   orchestrateAction: ({ command, executionMode }) =>
     handleCommandWithAi({
@@ -112,6 +113,15 @@ function appendTaskHistory(taskId, eventType, payload) {
   }
 
   return database.appendTaskHistory(taskId, eventType, payload);
+}
+
+function systemSnapshot() {
+  return {
+    agents: agentRegistry,
+    tasks: database.listTasks(),
+    approvals: approvalQueue.list({ status: "pending" }),
+    files: database.listFiles ? database.listFiles() : []
+  };
 }
 
 function isProtectedPath(url) {
@@ -293,6 +303,16 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { tasks: database.listTasks() });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/tasks/search") {
+    if (!requirePermission(req, res, "tasks:read")) return;
+    const query = url.searchParams.get("q") || "";
+    const matches = searchTasks(database.listTasks(), query).map((entry) => ({
+      ...entry.task,
+      matchScore: entry.score
+    }));
+    return sendJson(res, 200, { query, tasks: matches });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/tasks") {
     if (!requirePermission(req, res, "tasks:create")) return;
     const payload = await readJsonBody(req);
@@ -302,6 +322,18 @@ async function handleApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/command") {
     if (!requirePermission(req, res, "agents:execute")) return;
     const payload = await readJsonBody(req);
+    const statusReport = buildStatusReportForMessage(payload.command, systemSnapshot());
+    if (statusReport) {
+      return sendJson(res, 200, {
+        selected_agent: agentRegistry.find((agent) => agent.type === "ceo"),
+        task_id: statusReport.task?.id || null,
+        status: "status_report",
+        response: statusReport.response,
+        approval_required: false,
+        status_report: statusReport,
+        task_status: statusReport.kind === "task_status" ? statusReport.task : null
+      });
+    }
     const result = await handleCommandWithAi({
       command: payload.command,
       createTask,

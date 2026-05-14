@@ -607,9 +607,96 @@ async function testChatStatusUsesSystemSnapshot() {
     }
   });
   const result = await chatAgent.respond({ message: "CEO, what is the current status of all agents?" });
+  assert.equal(result.intent, "agent_status");
+  assert.match(result.response, /CEO Agent agent status report/);
+  assert.match(result.response, /Coding Agent/);
+  repository.close();
+}
+
+async function testTaskSpecificStatusSearch() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const calculatorTask = repository.createTask({
+    title: "Build Calculator App",
+    description: "User request: create a calculator app",
+    assignedAgentId: "coding-agent",
+    status: "running",
+    intent: "coding",
+    metadata: {
+      requirements: ["CLI calculator", "add/subtract/multiply/divide", "input validation", "tests"]
+    }
+  });
+  repository.createTask({
+    title: "Chat Agent: hello",
+    description: "hello",
+    assignedAgentId: "chat-agent",
+    status: "completed",
+    intent: "chat"
+  });
+  approvalQueue.add({
+    taskId: calculatorTask.id,
+    title: "Approve Coding Agent file generation for Build Calculator App",
+    approvalType: "repo_modification",
+    riskLevel: "medium",
+    requestedBy: "coding-agent"
+  });
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    getSystemStatus: () => ({
+      agents: agentRegistry,
+      tasks: repository.listTasks(),
+      approvals: approvalQueue.list({ status: "pending" })
+    }),
+    llmProvider: {
+      async sendMessage() {
+        throw new Error("Task status should not call LLM");
+      }
+    }
+  });
+  const result = await chatAgent.respond({ message: "status of calculator app" });
+  assert.equal(result.intent, "task_status");
+  assert.equal(result.status_report.task.title, "Build Calculator App");
+  assert.equal(result.status_report.task.current_status, "waiting_approval");
+  assert.match(result.response, /Build Calculator App/);
+  assert.match(result.response, /Approval required/);
+  assert.doesNotMatch(result.response, /Chat Agent: hello/);
+  repository.close();
+}
+
+async function testStatusReportDedupesRepeatedChatTasks() {
+  const repository = createDatabaseRepository({ memory: true });
+  for (let index = 0; index < 3; index += 1) {
+    repository.createTask({
+      title: "Chat Agent: hello",
+      description: "hello",
+      assignedAgentId: "chat-agent",
+      status: "completed",
+      intent: "chat"
+    });
+  }
+  repository.createTask({
+    title: "Build Calculator App",
+    assignedAgentId: "coding-agent",
+    status: "waiting_approval",
+    intent: "coding"
+  });
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    getSystemStatus: () => ({
+      agents: agentRegistry,
+      tasks: repository.listTasks(),
+      approvals: []
+    })
+  });
+  const result = await chatAgent.respond({ message: "what is going on" });
   assert.equal(result.intent, "system_status");
-  assert.match(result.response, /CEO Agent status report/);
-  assert.match(result.response, /Status smoke task/);
+  assert.match(result.response, /Latest unique tasks/);
+  assert.equal((result.response.match(/Chat Agent: hello/g) || []).length, 1);
+  assert.match(result.response, /waiting_approval: 1/);
   repository.close();
 }
 
@@ -703,6 +790,9 @@ async function testRbacHttpFlow() {
       })).response.status,
       201
     );
+    const taskSearch = await request(baseUrl, "/api/tasks/search?q=admin", { headers: adminHeaders });
+    assert.equal(taskSearch.response.status, 200);
+    assert.equal(taskSearch.body.tasks.some((task) => task.title === "Admin task"), true);
     const commandResult = await request(baseUrl, "/api/command", {
       method: "POST",
       headers: adminHeaders,
@@ -782,6 +872,8 @@ async function main() {
   await testAgentOrchestrator();
   await testChatAgentUsesLlmProvider();
   await testChatStatusUsesSystemSnapshot();
+  await testTaskSpecificStatusSearch();
+  await testStatusReportDedupesRepeatedChatTasks();
   await testRbacHttpFlow();
 
   console.log("Backend tests passed.");

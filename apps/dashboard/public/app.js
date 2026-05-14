@@ -536,6 +536,26 @@ function renderChatTaskResult(payload) {
   `;
 }
 
+function renderChatStatusResult(report) {
+  const element = document.getElementById("chat-task-result");
+  if (!element) {
+    return;
+  }
+  if (!report?.task?.id) {
+    return;
+  }
+  lastCreatedTaskId = report.task.id;
+  element.classList.remove("hidden");
+  element.innerHTML = `
+    <div>
+      <strong>${escapeHtml(report.task.title)}</strong>
+      <span>${escapeHtml(report.task.assigned_agent)} - ${escapeHtml(report.task.current_status)}</span>
+      <span>${escapeHtml(report.task.pending_approval ? "Approval required" : report.task.next_action)}</span>
+    </div>
+    <button class="secondary-button" type="button" data-open-task="${escapeHtml(report.task.id)}">Open Task</button>
+  `;
+}
+
 function latestTaskOutput(task) {
   const event = task.history?.find((item) => ["agent.result", "agent.failed", "test.run"].includes(item.eventType));
   if (!event) {
@@ -951,8 +971,14 @@ async function sendCommand(event) {
 
   const payload = await response.json();
   result.textContent = `${payload.selected_agent?.name || "CEO Agent"} -> ${payload.status}. ${payload.response}`;
+  if (payload.status_report?.kind === "task_status") {
+    renderChatStatusResult(payload.status_report);
+  }
   input.value = "";
-  showToast(payload.approval_required ? "Approval required" : "Task routed", payload.approval_required ? "warning" : "success");
+  showToast(
+    payload.status === "status_report" ? "CEO status ready" : payload.approval_required ? "Approval required" : "Task routed",
+    payload.approval_required ? "warning" : "success"
+  );
   pushActivity(`CEO Agent ${payload.status}: ${payload.selected_agent?.name || "status"}`, "agent");
   await loadDashboard();
 }
@@ -1044,6 +1070,9 @@ async function sendChatRequest(overrides = {}) {
   };
   input.value = "";
   await streamAssistantMessage(payload.response);
+  if (payload.status_report?.kind === "task_status") {
+    renderChatStatusResult(payload.status_report);
+  }
   if (payload.orchestration?.task_id) {
     renderChatTaskResult(payload.orchestration);
     showToast(`Task ${payload.orchestration.status}`, payload.orchestration.approval_required ? "warning" : "success");
