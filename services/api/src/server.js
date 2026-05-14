@@ -76,6 +76,11 @@ const chatAgent = createChatAgent({
   storageService,
   findTask,
   llmProvider,
+  getSystemStatus: () => ({
+    agents: agentRegistry,
+    tasks: database.listTasks(),
+    approvals: approvalQueue.list({ status: "pending" })
+  }),
   orchestrateAction: ({ command, executionMode }) =>
     handleCommandWithAi({
       command,

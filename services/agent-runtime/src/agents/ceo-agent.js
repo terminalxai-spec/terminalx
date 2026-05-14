@@ -338,6 +338,19 @@ async function handleCommandWithAi({ command, createTask, approvalQueue, llmProv
 
   const classification = await classifyIntentWithAi(trimmedCommand, llmProvider);
   const risk = evaluateRisk(trimmedCommand, classification.agent);
+  if (
+    classification.intent === "chat" &&
+    /\b(status|what is going on|what's going on|current status|all agents|pending approvals|running tasks|what is happening)\b/i.test(trimmedCommand)
+  ) {
+    return {
+      selected_agent: classification.agent,
+      task_id: null,
+      status: "status_request",
+      response: "CEO Agent status requests are answered from the Chat page status report and dashboard activity feed. No new task was required.",
+      approval_required: false,
+      classifier: classification.classifier
+    };
+  }
   const taskPayload = buildTaskPayload(trimmedCommand, classification, risk);
   const mode = normalizeExecutionMode(executionMode);
   const task = createTask({

@@ -583,6 +583,36 @@ async function testChatAgentUsesLlmProvider() {
   repository.close();
 }
 
+async function testChatStatusUsesSystemSnapshot() {
+  const repository = createDatabaseRepository({ memory: true });
+  repository.createTask({
+    title: "Status smoke task",
+    assignedAgentId: "coding-agent",
+    status: "running",
+    intent: "coding"
+  });
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    getSystemStatus: () => ({
+      agents: agentRegistry,
+      tasks: repository.listTasks(),
+      approvals: []
+    }),
+    llmProvider: {
+      async sendMessage() {
+        throw new Error("Status should not call LLM");
+      }
+    }
+  });
+  const result = await chatAgent.respond({ message: "CEO, what is the current status of all agents?" });
+  assert.equal(result.intent, "system_status");
+  assert.match(result.response, /CEO Agent status report/);
+  assert.match(result.response, /Status smoke task/);
+  repository.close();
+}
+
 function waitForServer(baseUrl, child) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
@@ -751,6 +781,7 @@ async function main() {
   await testAiProviders();
   await testAgentOrchestrator();
   await testChatAgentUsesLlmProvider();
+  await testChatStatusUsesSystemSnapshot();
   await testRbacHttpFlow();
 
   console.log("Backend tests passed.");

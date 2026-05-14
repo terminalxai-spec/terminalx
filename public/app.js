@@ -942,12 +942,18 @@ async function sendCommand(event) {
     showLogin("Login required.");
     return;
   }
+  if (!response.ok) {
+    const message = await readErrorMessage(response, "CEO Agent command failed.");
+    result.textContent = message;
+    showToast(message, "error");
+    return;
+  }
 
   const payload = await response.json();
-  result.textContent = `${payload.selected_agent.name} -> ${payload.status}. ${payload.response}`;
+  result.textContent = `${payload.selected_agent?.name || "CEO Agent"} -> ${payload.status}. ${payload.response}`;
   input.value = "";
   showToast(payload.approval_required ? "Approval required" : "Task routed", payload.approval_required ? "warning" : "success");
-  pushActivity(`CEO Agent ${payload.status}: ${payload.selected_agent.name}`, "agent");
+  pushActivity(`CEO Agent ${payload.status}: ${payload.selected_agent?.name || "status"}`, "agent");
   await loadDashboard();
 }
 

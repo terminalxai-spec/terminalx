@@ -37,6 +37,10 @@ function classifyChatIntent(message, payload = {}) {
     return "explain_task";
   }
 
+  if (/\b(status|what is going on|what's going on|current status|all agents|pending approvals|running tasks|what is happening)\b/i.test(normalized)) {
+    return "system_status";
+  }
+
   if (/\b(create|build|make|implement|generate|fix|analyze repo|write code|create document)\b/i.test(normalized)) {
     return "action_request";
   }
@@ -87,6 +91,31 @@ function explainTask(task) {
     `Risk: ${task.riskLevel}`,
     `History events: ${historyCount}`,
     `Description: ${task.description || "No description"}`
+  ].join("\n");
+}
+
+function buildSystemStatus(snapshot = {}) {
+  const agents = snapshot.agents || [];
+  const tasks = snapshot.tasks || [];
+  const approvals = snapshot.approvals || [];
+  const runningTasks = tasks.filter((task) => ["running", "assigned", "waiting_approval", "planned"].includes(task.status));
+  const recentTasks = tasks.slice(0, 5);
+
+  return [
+    "CEO Agent status report:",
+    `- Agents online: ${agents.length || "unknown"}`,
+    `- Total tasks: ${tasks.length}`,
+    `- Active/running tasks: ${runningTasks.length}`,
+    `- Pending approvals: ${approvals.length}`,
+    "",
+    "Recent tasks:",
+    ...(recentTasks.length
+      ? recentTasks.map((task) => `- ${task.title} | ${task.status} | ${task.assignedAgentId || "unassigned"}`)
+      : ["- No tasks yet."]),
+    "",
+    approvals.length
+      ? `Next action: review ${approvals.length} pending approval(s) in the Approvals page.`
+      : "Next action: no approvals are currently blocking execution."
   ].join("\n");
 }
 
@@ -163,7 +192,15 @@ async function answerWithLlm({ message, intent, llmProvider }) {
   }
 }
 
-function createChatAgent({ conversations, conversationRepository = null, storageService, findTask, llmProvider = null, orchestrateAction = null }) {
+function createChatAgent({
+  conversations,
+  conversationRepository = null,
+  storageService,
+  findTask,
+  llmProvider = null,
+  orchestrateAction = null,
+  getSystemStatus = null
+}) {
   function getOrCreateConversation(conversationId) {
     const id = conversationId || `chat_${Date.now()}`;
     if (conversationRepository) {
@@ -242,6 +279,8 @@ function createChatAgent({ conversations, conversationRepository = null, storage
       response = await summarizeFile(payload.file_id, storageService);
     } else if (intent === "explain_task") {
       response = explainTask(findTask(payload.task_id));
+    } else if (intent === "system_status") {
+      response = buildSystemStatus(typeof getSystemStatus === "function" ? getSystemStatus() : {});
     } else if (intent === "action_request" && typeof orchestrateAction === "function") {
       orchestration = await orchestrateAction({
         command: message,
