@@ -136,8 +136,11 @@ function evaluateRisk(command, selectedAgent) {
 
 function buildTaskPayload(command, classification, risk) {
   const codingBuildTask = buildCodingBuildTask(command, classification);
+  const executionPlan = buildExecutionPlan(command, classification, codingBuildTask?.metadata?.requirements || []);
   const metadata = {
-    ...(codingBuildTask?.metadata || {})
+    ...(codingBuildTask?.metadata || {}),
+    execution_plan: executionPlan,
+    priority: inferPriority(command)
   };
 
   return {
@@ -150,6 +153,42 @@ function buildTaskPayload(command, classification, risk) {
     riskLevel: risk.riskLevel,
     metadata
   };
+}
+
+function normalizeExecutionMode(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (["plan", "plan_mode", "planning"].includes(normalized)) {
+    return "plan";
+  }
+  return "execution";
+}
+
+function inferPriority(command) {
+  return /\b(urgent|asap|now|critical|production)\b/i.test(command) ? "high" : "normal";
+}
+
+function buildExecutionPlan(command, classification, requirements = []) {
+  const baseSteps = [
+    "CEO Agent classified intent and selected specialist agent",
+    `Create structured task for ${classification.agent.name}`,
+    `${classification.agent.name} receives task context and requirements`,
+    `${classification.agent.name} executes safe workflow and records logs`,
+    "Approval queue pauses any risky or file-writing action",
+    "Task history is updated for the dashboard activity feed"
+  ];
+
+  if (classification.agent.type === "coding") {
+    return [
+      ...baseSteps,
+      "Coding Agent drafts implementation files or change plan",
+      "Testing Agent can validate generated output after approval"
+    ];
+  }
+
+  if (requirements.length) {
+    return [...baseSteps, ...requirements.map((item) => `Requirement: ${item}`)];
+  }
+  return baseSteps;
 }
 
 function titleCase(value) {
@@ -234,6 +273,23 @@ function createApprovalForTask({ task, agent, command, risk, approvalQueue }) {
   return approvalQueue.add(approval);
 }
 
+function createExecutionApproval({ task, agent, command, approvalQueue }) {
+  return approvalQueue.add({
+    title: `Approve execution for ${agent.name}`,
+    taskId: task.id,
+    requestedBy: "ceo-agent",
+    assignedAgentId: agent.id,
+    approvalType: "execute_plan",
+    riskLevel: "medium",
+    description: `Plan mode created this task and is waiting for approval before execution: ${command}`,
+    proposedAction: {
+      command,
+      agentType: agent.type,
+      executionPlan: task.metadata?.execution_plan || []
+    }
+  });
+}
+
 function handleCommand({ command, createTask, approvalQueue }) {
   const trimmedCommand = String(command || "").trim();
   if (!trimmedCommand) {
@@ -274,7 +330,7 @@ function handleCommand({ command, createTask, approvalQueue }) {
   };
 }
 
-async function handleCommandWithAi({ command, createTask, approvalQueue, llmProvider, orchestrator }) {
+async function handleCommandWithAi({ command, createTask, approvalQueue, llmProvider, orchestrator, executionMode = "execution" }) {
   const trimmedCommand = String(command || "").trim();
   if (!trimmedCommand) {
     throw new Error("command is required");
@@ -282,23 +338,36 @@ async function handleCommandWithAi({ command, createTask, approvalQueue, llmProv
 
   const classification = await classifyIntentWithAi(trimmedCommand, llmProvider);
   const risk = evaluateRisk(trimmedCommand, classification.agent);
+  const taskPayload = buildTaskPayload(trimmedCommand, classification, risk);
+  const mode = normalizeExecutionMode(executionMode);
   const task = createTask({
-    ...buildTaskPayload(trimmedCommand, classification, risk),
+    ...taskPayload,
+    status: mode === "plan" ? "planned" : taskPayload.status,
     metadata: {
-      ...buildTaskPayload(trimmedCommand, classification, risk).metadata,
-      classifier: classification.classifier
+      ...taskPayload.metadata,
+      classifier: classification.classifier,
+      execution_mode: mode,
+      supervisor: "ceo-agent"
     }
   });
 
-  if (isCodingBuildRequest(trimmedCommand, classification) && !risk.approvalRequired) {
+  if (mode === "plan") {
+    const approval = createExecutionApproval({
+      task,
+      agent: classification.agent,
+      command: trimmedCommand,
+      approvalQueue
+    });
     return {
       selected_agent: classification.agent,
       task_id: task.id,
-      status: "created",
-      response: "Task created and assigned to Coding Agent.",
-      approval_required: false,
+      status: "planned",
+      response: `CEO Agent created an execution plan for ${classification.agent.name}. Approval is required before execution.`,
+      approval_required: true,
+      approval_id: approval.id,
       task,
       requirements: task.metadata?.requirements || [],
+      execution_plan: task.metadata?.execution_plan || [],
       classifier: classification.classifier
     };
   }
@@ -345,6 +414,9 @@ async function handleCommandWithAi({ command, createTask, approvalQueue, llmProv
       approval_required: execution.approval_required,
       approval_id: execution.approval_id,
       result: execution.result,
+      task,
+      requirements: task.metadata?.requirements || [],
+      execution_plan: task.metadata?.execution_plan || [],
       classifier: classification.classifier
     };
   }

@@ -1027,6 +1027,10 @@ async function sendChatRequest(overrides = {}) {
   };
   input.value = "";
   await streamAssistantMessage(payload.response);
+  if (payload.orchestration?.task_id) {
+    renderChatTaskResult(payload.orchestration);
+    showToast(`Task ${payload.orchestration.status}`, payload.orchestration.approval_required ? "warning" : "success");
+  }
   pushActivity(`Chat Agent responded: ${payload.intent}`, "chat");
   setChatStatus("ready");
   await loadDashboard();

@@ -30,6 +30,80 @@ function suggestChange(payload) {
   };
 }
 
+function proposedFilesForTask(task, command) {
+  const requirements = task.metadata?.requirements || [];
+  if (/\bcalculator\b/i.test(`${task.title} ${task.description} ${command}`)) {
+    return [
+      {
+        path: "terminalx-generated/calculator/calculator.js",
+        purpose: "CLI calculator implementation with add/subtract/multiply/divide operations and input validation."
+      },
+      {
+        path: "terminalx-generated/calculator/calculator.test.js",
+        purpose: "Focused tests for arithmetic operations and invalid input handling."
+      },
+      {
+        path: "terminalx-generated/calculator/README.md",
+        purpose: "Usage guide for running the CLI calculator and tests."
+      }
+    ];
+  }
+
+  return [
+    {
+      path: "terminalx-generated/implementation/README.md",
+      purpose: `Implementation notes for: ${task.title}`
+    },
+    {
+      path: "terminalx-generated/implementation/index.js",
+      purpose: "Minimal implementation entry point."
+    },
+    {
+      path: "terminalx-generated/implementation/index.test.js",
+      purpose: "Focused validation tests."
+    }
+  ].filter(Boolean).map((file) => ({
+    ...file,
+    requirements
+  }));
+}
+
+function executeAssignedTask({ task, command, approvalQueue }) {
+  const proposedFiles = proposedFilesForTask(task, command);
+  const approval = approvalQueue?.add?.({
+    title: `Approve Coding Agent file generation for ${task.title}`,
+    taskId: task.id,
+    requestedBy: "coding-agent",
+    assignedAgentId: "coding-agent",
+    approvalType: "repo_modification",
+    riskLevel: "medium",
+    description: "Coding Agent prepared a file-generation workflow. Approval is required before writing files.",
+    proposedAction: {
+      command,
+      proposedFiles,
+      requirements: task.metadata?.requirements || []
+    }
+  });
+
+  return {
+    agent: "coding-agent",
+    action: "execute_assigned_task",
+    status: approval ? "approval_required" : "planned",
+    approval_required: Boolean(approval),
+    approval_id: approval?.id || null,
+    response: approval
+      ? "Coding Agent analyzed the task and prepared file changes. Approval is required before writing to the workspace."
+      : "Coding Agent analyzed the task and prepared an implementation plan.",
+    logs: [
+      "Coding Agent received assigned task",
+      "Requirements parsed",
+      "Implementation files planned",
+      approval ? "Approval requested for repo modification" : "No approval queue available"
+    ],
+    proposed_files: proposedFiles
+  };
+}
+
 function createFile(payload) {
   return {
     agent: "coding-agent",
@@ -78,6 +152,7 @@ function githubStatus() {
 module.exports = {
   createFile,
   deleteFile,
+  executeAssignedTask,
   executeCommand,
   githubStatus,
   modifyFile,

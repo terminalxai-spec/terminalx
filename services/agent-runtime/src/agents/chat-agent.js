@@ -37,6 +37,10 @@ function classifyChatIntent(message, payload = {}) {
     return "explain_task";
   }
 
+  if (/\b(create|build|make|implement|generate|fix|analyze repo|write code|create document)\b/i.test(normalized)) {
+    return "action_request";
+  }
+
   if (normalized.includes("plan") || normalized.includes("roadmap") || normalized.includes("steps")) {
     return "plan_work";
   }
@@ -56,7 +60,7 @@ function buildPlan(message) {
 }
 
 function buildTaskSuggestions(message, intent) {
-  if (intent !== "plan_work") {
+  if (!["plan_work", "action_request"].includes(intent)) {
     return [];
   }
 
@@ -159,7 +163,7 @@ async function answerWithLlm({ message, intent, llmProvider }) {
   }
 }
 
-function createChatAgent({ conversations, conversationRepository = null, storageService, findTask, llmProvider = null }) {
+function createChatAgent({ conversations, conversationRepository = null, storageService, findTask, llmProvider = null, orchestrateAction = null }) {
   function getOrCreateConversation(conversationId) {
     const id = conversationId || `chat_${Date.now()}`;
     if (conversationRepository) {
@@ -233,10 +237,23 @@ function createChatAgent({ conversations, conversationRepository = null, storage
     });
 
     let response;
+    let orchestration = null;
     if (intent === "summarize_file") {
       response = await summarizeFile(payload.file_id, storageService);
     } else if (intent === "explain_task") {
       response = explainTask(findTask(payload.task_id));
+    } else if (intent === "action_request" && typeof orchestrateAction === "function") {
+      orchestration = await orchestrateAction({
+        command: message,
+        executionMode: payload.execution_mode || payload.executionMode || "execution",
+        conversationId: conversation.id
+      });
+      response = [
+        `CEO Agent accepted the request and assigned ${orchestration.selected_agent?.name || "a specialist agent"}.`,
+        `Task: ${orchestration.task?.title || orchestration.task_id}`,
+        `Status: ${orchestration.status}`,
+        orchestration.approval_required ? `Approval required: ${orchestration.approval_id}` : "Execution pipeline started."
+      ].join("\n");
     } else if (intent === "plan_work") {
       response = await answerWithLlm({ message, intent, llmProvider }) || buildPlan(message);
     } else {
@@ -246,7 +263,8 @@ function createChatAgent({ conversations, conversationRepository = null, storage
     const taskSuggestions = buildTaskSuggestions(message, intent);
     appendMessage(conversation, "assistant", response, {
       intent,
-      task_suggestions: taskSuggestions
+      task_suggestions: taskSuggestions,
+      orchestration
     });
 
     return {
@@ -255,6 +273,7 @@ function createChatAgent({ conversations, conversationRepository = null, storage
       intent,
       response,
       task_suggestions: taskSuggestions,
+      orchestration,
       history_count: conversation.messages.length
     };
   }

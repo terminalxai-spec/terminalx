@@ -58,10 +58,22 @@ function testRiskPolicy() {
 async function testCeoCreatesCodingBuildTask() {
   const repository = createDatabaseRepository({ memory: true });
   const approvalQueue = createApprovalQueue(repository);
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId)
+  });
+  const orchestrator = createAgentOrchestrator({
+    repository,
+    approvalQueue,
+    chatAgent,
+    workspaceRoot: process.cwd()
+  });
   const result = await handleCommandWithAi({
     command: "create simple calculator",
     createTask: (payload) => repository.createTask(payload),
     approvalQueue,
+    orchestrator,
     llmProvider: {
       async classifyIntent() {
         return { intent: "coding", provider: "test" };
@@ -70,18 +82,53 @@ async function testCeoCreatesCodingBuildTask() {
   });
 
   const task = repository.findTask(result.task_id);
-  assert.equal(result.status, "created");
+  assert.equal(result.status, "waiting_approval");
   assert.equal(result.selected_agent.type, "coding");
-  assert.equal(result.response, "Task created and assigned to Coding Agent.");
+  assert.match(result.response, /waiting for approval/i);
   assert.equal(task.title, "Build Simple Calculator");
   assert.equal(task.assignedAgentId, "coding-agent");
-  assert.equal(task.status, "created");
+  assert.equal(task.status, "waiting_approval");
   assert.deepEqual(task.metadata.requirements, [
     "CLI calculator",
     "add/subtract/multiply/divide",
     "input validation",
     "tests"
   ]);
+  assert.equal(repository.listApprovals({ status: "pending" }).some((approval) => approval.approvalType === "repo_modification"), true);
+  repository.close();
+}
+
+async function testChatEscalatesActionRequests() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId),
+    orchestrateAction: ({ command }) =>
+      handleCommandWithAi({
+        command,
+        createTask: (payload) => repository.createTask(payload),
+        approvalQueue,
+        orchestrator,
+        llmProvider: {
+          async classifyIntent() {
+            return { intent: "coding", provider: "test" };
+          }
+        }
+      })
+  });
+  const orchestrator = createAgentOrchestrator({
+    repository,
+    approvalQueue,
+    chatAgent,
+    workspaceRoot: process.cwd()
+  });
+  const result = await chatAgent.respond({ message: "build calculator app" });
+  assert.equal(result.intent, "action_request");
+  assert.equal(result.orchestration.selected_agent.type, "coding");
+  assert.equal(repository.listTasks().length, 1);
+  assert.equal(repository.listTasks()[0].status, "waiting_approval");
   repository.close();
 }
 
@@ -696,6 +743,7 @@ async function main() {
   testCommandRouting();
   testRiskPolicy();
   await testCeoCreatesCodingBuildTask();
+  await testChatEscalatesActionRequests();
   testRuntimeModes();
   testDatabaseRepository();
   testPostgresRepositoryInterface();

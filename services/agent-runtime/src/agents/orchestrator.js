@@ -5,6 +5,7 @@ const tradingAgent = require("./trading-agent");
 
 const TASK_STATUSES = Object.freeze({
   CREATED: "created",
+  PLANNED: "planned",
   ASSIGNED: "assigned",
   RUNNING: "running",
   WAITING_APPROVAL: "waiting_approval",
@@ -40,10 +41,18 @@ function commandFilePath(command) {
   return match?.[1] || "";
 }
 
-async function executeCodingTask({ task, command }) {
+async function executeCodingTask({ task, command, approvalQueue }) {
   const targetPath = commandFilePath(command);
   if (targetPath && /\b(read|open|show|inspect)\b/i.test(command)) {
     return codingAgent.readFile({ path: targetPath });
+  }
+
+  if (task.metadata?.task_kind === "coding_build" || /\b(build|create|make|implement)\b/i.test(command)) {
+    return codingAgent.executeAssignedTask({
+      task,
+      command,
+      approvalQueue
+    });
   }
 
   return codingAgent.suggestChange({
@@ -82,7 +91,7 @@ async function executeTaskByAgent({ agent, task, command, context }) {
         createTask: context.repository.createTask?.bind(context.repository)
       });
     case "coding":
-      return executeCodingTask({ task, command });
+      return executeCodingTask({ task, command, approvalQueue: context.approvalQueue });
     default:
       return {
         agent: agent.id,
@@ -101,7 +110,8 @@ function createAgentOrchestrator({ repository, approvalQueue, chatAgent, workspa
 
     updateStatus(repository, task.id, TASK_STATUSES.ASSIGNED, {
       assigned_agent_id: agent.id,
-      assigned_agent_type: agent.type
+      assigned_agent_type: agent.type,
+      supervisor: "ceo-agent"
     });
     if (approvalRequired) {
       updateStatus(repository, task.id, TASK_STATUSES.WAITING_APPROVAL, {
@@ -116,7 +126,8 @@ function createAgentOrchestrator({ repository, approvalQueue, chatAgent, workspa
       };
     }
     updateStatus(repository, task.id, TASK_STATUSES.RUNNING, {
-      command
+      command,
+      pipeline: task.metadata?.execution_plan || []
     });
 
     try {

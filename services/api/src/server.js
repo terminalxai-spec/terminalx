@@ -70,13 +70,23 @@ const storageService = createStorageService({
   appendTaskHistory
 });
 const llmProvider = createLlmProvider();
+let agentOrchestrator;
 const chatAgent = createChatAgent({
   conversationRepository: database,
   storageService,
   findTask,
-  llmProvider
+  llmProvider,
+  orchestrateAction: ({ command, executionMode }) =>
+    handleCommandWithAi({
+      command,
+      createTask,
+      approvalQueue,
+      llmProvider,
+      orchestrator: agentOrchestrator,
+      executionMode
+    })
 });
-const agentOrchestrator = createAgentOrchestrator({
+agentOrchestrator = createAgentOrchestrator({
   repository: database,
   approvalQueue,
   chatAgent,
@@ -292,7 +302,8 @@ async function handleApi(req, res, url) {
       createTask,
       approvalQueue,
       llmProvider,
-      orchestrator: agentOrchestrator
+      orchestrator: agentOrchestrator,
+      executionMode: payload.execution_mode || payload.executionMode || "execution"
     });
     return sendJson(res, 201, result);
   }
