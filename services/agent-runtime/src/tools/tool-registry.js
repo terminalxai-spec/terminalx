@@ -22,9 +22,19 @@ function audit(context, toolName, payload = {}) {
     if (typeof value === "string") return redactSecrets(value);
     return value;
   }));
-  context.logAction?.(`tool.${toolName}`, safePayload, context.agentId || null);
+  try {
+    context.logAction?.(`tool.${toolName}`, safePayload, context.agentId || null);
+  } catch (error) {
+    if (context.taskId) {
+      appendWorkspaceLog(context.taskId, "audit-warning", `Audit log failed for ${toolName}: ${error.message}`);
+    }
+  }
   if (context.taskId) {
-    context.appendTaskHistory?.(context.taskId, `tool.${toolName}`, safePayload);
+    try {
+      context.appendTaskHistory?.(context.taskId, `tool.${toolName}`, safePayload);
+    } catch (error) {
+      appendWorkspaceLog(context.taskId, "history-warning", `Task history log failed for ${toolName}: ${error.message}`);
+    }
     appendWorkspaceLog(context.taskId, toolName, JSON.stringify(safePayload, null, 2));
   }
 }

@@ -60,6 +60,15 @@ const agentRegistry = [
     defaultModel: "claude-haiku-4-5-20251213",
     responsibilities: ["Answer questions", "Route lightweight requests", "Summarize tasks"],
     permissions: ["read_only"]
+  },
+  {
+    id: "research-agent",
+    name: "Research Agent",
+    type: "research",
+    status: "available",
+    defaultModel: "groq-llama-3.3-70b-versatile",
+    responsibilities: ["Search web sources", "Fetch pages", "Summarize findings"],
+    permissions: ["read_only", "internet_access"]
   }
 ];
 

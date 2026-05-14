@@ -33,7 +33,7 @@ const {
 const { rolePermissions, seedRbac } = require("../services/api/src/rbac");
 
 function testAgentRegistry() {
-  const requiredTypes = ["ceo", "coding", "testing", "content", "trading", "chat"];
+  const requiredTypes = ["ceo", "coding", "testing", "content", "trading", "chat", "research"];
   for (const type of requiredTypes) {
     assert.ok(agentRegistry.some((agent) => agent.type === type), `Missing ${type} agent`);
   }
@@ -603,6 +603,18 @@ async function testExecutionWorkspaceTools() {
   assert.equal(created.status, "created");
   assert.equal(registry.listWorkspaceFiles(task.id).some((file) => file.path === "calculator/index.js"), true);
   repository.close();
+}
+
+async function testToolAuditFailureDoesNotBreakExecution() {
+  const registry = createToolRegistry({
+    agentId: "research-agent",
+    logAction: () => {
+      throw new Error("foreign key failed");
+    }
+  });
+  const result = await registry.execute("web-search", { query: "gold rate mumbai", limit: 1 });
+  assert.equal(result.status, "completed");
+  assert.equal(result.results.length, 1);
 }
 
 async function testDynamicCodingGeneration() {
@@ -1787,6 +1799,7 @@ async function main() {
   testPostgresRepositoryInterface();
   await testFileStorageProviders();
   await testExecutionWorkspaceTools();
+  await testToolAuditFailureDoesNotBreakExecution();
   await testDynamicCodingGeneration();
   await testCodingAgentSelfFixLoop();
   await testCodingAgentRetryLimitEnforced();
