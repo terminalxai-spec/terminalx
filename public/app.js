@@ -969,6 +969,12 @@ async function sendChatRequest(overrides = {}) {
     return;
   }
 
+  const isActionRequest = /\b(create|build|make|implement|generate|fix|analyze repo|write code|create document)\b/i.test(message);
+  if (isActionRequest && can("agents:execute")) {
+    await createTaskFromChat(message);
+    return;
+  }
+
   let attachedFileId = fileId || null;
   if (pendingAttachmentFile) {
     try {
@@ -1078,12 +1084,12 @@ function selectConversation(event) {
   renderChatMessages(activeConversation());
 }
 
-async function createTaskFromChat() {
+async function createTaskFromChat(commandOverride = "") {
   if (!can("chat:use") || !can("agents:execute")) {
     return;
   }
   const input = document.getElementById("chat-input");
-  const draft = input.value.trim();
+  const draft = String(commandOverride || input.value).trim();
   const suggestion = lastChatTaskSuggestion || {
     title: "Chat follow-up",
     command: draft || "Create a task suggestion from the current chat conversation."
@@ -1099,7 +1105,8 @@ async function createTaskFromChat() {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      command: `Create CEO task suggestion: ${command}`,
+      command,
+      fast: true,
       conversation_id: activeConversationId
     })
   });
@@ -1114,6 +1121,18 @@ async function createTaskFromChat() {
     return;
   }
   setChatStatus("task created");
+  appendLocalMessage("user", command);
+  appendLocalMessage(
+    "assistant",
+    [
+      `CEO Agent started orchestration.`,
+      `Task: ${payload.task?.title || payload.task_id}`,
+      `Assigned agent: ${payload.selected_agent?.name || "Specialist agent"}`,
+      `Status: ${payload.status}`,
+      payload.approval_required ? `Approval required: ${payload.approval_id}` : "Execution pipeline started."
+    ].join("\n"),
+    { orchestration: payload }
+  );
   input.value = "";
   showToast("Task created and assigned", "success");
   pushActivity(`CEO Agent created task ${payload.task_id}`, "task");

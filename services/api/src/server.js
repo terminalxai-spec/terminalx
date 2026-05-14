@@ -81,7 +81,7 @@ const chatAgent = createChatAgent({
       command,
       createTask,
       approvalQueue,
-      llmProvider,
+      llmProvider: null,
       orchestrator: agentOrchestrator,
       executionMode
     })
@@ -301,7 +301,7 @@ async function handleApi(req, res, url) {
       command: payload.command,
       createTask,
       approvalQueue,
-      llmProvider,
+      llmProvider: payload.fast === true ? null : llmProvider,
       orchestrator: agentOrchestrator,
       executionMode: payload.execution_mode || payload.executionMode || "execution"
     });
