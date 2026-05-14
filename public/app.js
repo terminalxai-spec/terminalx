@@ -269,6 +269,10 @@ function renderAgents(elementId, agents) {
 }
 
 function renderApproval(approval) {
+  const approvalDisabled = can("approvals:approve") ? "" : "disabled";
+  const approvalHelp = can("approvals:approve")
+    ? ""
+    : `<div class="muted">Your current role can view approvals but cannot approve or reject them.</div>`;
   return `
     <strong>${escapeHtml(approval.title)}</strong>
     <div class="muted">
@@ -277,9 +281,10 @@ function renderApproval(approval) {
       ${pill(approval.status, approval.status)}
     </div>
     <div class="muted preline">${escapeHtml(approval.description)}</div>
+    ${approvalHelp}
     <div class="button-row">
-      <button data-approval-action="approve" data-approval-id="${escapeHtml(approval.id)}">Approve</button>
-      <button class="danger-button" data-approval-action="reject" data-approval-id="${escapeHtml(approval.id)}">Reject</button>
+      <button data-approval-action="approve" data-approval-id="${escapeHtml(approval.id)}" ${approvalDisabled}>Approve</button>
+      <button class="danger-button" data-approval-action="reject" data-approval-id="${escapeHtml(approval.id)}" ${approvalDisabled}>Reject</button>
     </div>
   `;
 }
@@ -1304,16 +1309,32 @@ async function decideApproval(event) {
     return;
   }
   if (!can("approvals:approve")) {
+    showToast("Your role does not have approval permission.", "warning");
     return;
   }
 
   const action = button.dataset.approvalAction;
   const approvalId = button.dataset.approvalId;
-  await apiFetch(`/api/approvals/${approvalId}/${action}`, {
+  button.disabled = true;
+  button.textContent = action === "approve" ? "Approving..." : "Rejecting...";
+  const response = await apiFetch(`/api/approvals/${approvalId}/${action}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ decidedBy: "dashboard" })
   });
+  if (response.status === 401) {
+    showLogin("Login required.");
+    return;
+  }
+  if (!response.ok) {
+    const message = await readErrorMessage(response, "Approval action failed.");
+    showToast(message, "error");
+    button.disabled = false;
+    button.textContent = action === "approve" ? "Approve" : "Reject";
+    return;
+  }
+  showToast(action === "approve" ? "Approval granted" : "Approval rejected", "success");
+  pushActivity(`Approval ${action}d`, "approval");
   await loadDashboard();
 }
 
