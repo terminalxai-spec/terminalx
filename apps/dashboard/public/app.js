@@ -16,6 +16,7 @@ let lastCreatedTaskId = null;
 let dashboardFiles = [];
 let dashboardTasks = [];
 let dashboardApprovals = [];
+let dashboardAgents = [];
 let dashboardActionLog = [];
 let isGenerating = false;
 let stopGeneration = false;
@@ -247,24 +248,185 @@ function renderList(elementId, items, renderItem, emptyText) {
   }
 }
 
+function agentLabel(agentId = "") {
+  const agent = dashboardAgents.find((item) => item.id === agentId || item.type === agentId.replace("-agent", ""));
+  return agent?.name || agentId || "Unassigned agent";
+}
+
+function taskApproval(task) {
+  return dashboardApprovals.find((approval) => approval.taskId === task.id || approval.task_id === task.id) || null;
+}
+
+function approvalFiles(approval) {
+  return approval?.proposedAction?.proposedFiles || approval?.proposedAction?.files || [];
+}
+
+function approvalReason(approval) {
+  const files = approvalFiles(approval);
+  if (approval.approvalType === "repo_modification" && files.length) {
+    return `Create ${files.length} file${files.length === 1 ? "" : "s"} for ${approval.title.replace(/^Approve Coding Agent file generation for\s+/i, "")}`;
+  }
+  return approval.description || "Approve this action before the agent can continue.";
+}
+
+function workflowSteps(task) {
+  const approval = taskApproval(task);
+  const generatedFiles = task.metadata?.generated_files || [];
+  const status = approval ? "waiting_approval" : task.status;
+  return [
+    { label: "Request received", complete: true },
+    { label: "CEO planned task", complete: Boolean(task.metadata?.execution_plan || task.intent) },
+    { label: "Coding Agent assigned", complete: Boolean(task.assignedAgentId) },
+    { label: "Approval required", complete: ["waiting_approval", "completed", "failed"].includes(status), active: status === "waiting_approval" },
+    { label: "Files generated", complete: generatedFiles.length > 0 || status === "completed" },
+    { label: "Testing", complete: (task.history || []).some((event) => /test|testing/i.test(event.eventType)) || status === "completed" },
+    { label: "Completed", complete: status === "completed", active: status === "running" }
+  ];
+}
+
+function renderWorkflowStepper(task) {
+  return `
+    <div class="workflow-stepper">
+      ${workflowSteps(task)
+        .map(
+          (step) => `
+            <div class="workflow-step ${step.complete ? "complete" : ""} ${step.active ? "active" : ""}">
+              <span></span>
+              <small>${escapeHtml(step.label)}</small>
+            </div>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function nextActionText(task) {
+  const approval = taskApproval(task);
+  if (approval) {
+    return "Action needed: You must approve file generation.";
+  }
+  if (task.status === "completed") {
+    return "Task completed. Review generated files and logs.";
+  }
+  if (task.status === "failed") {
+    return "Task failed. Ask CEO Agent to inspect and retry safely.";
+  }
+  if (["created", "planned", "assigned"].includes(task.status)) {
+    return "Task is queued for the assigned agent.";
+  }
+  if (task.status === "running") {
+    return "Agent is working on the task.";
+  }
+  return "No action needed right now.";
+}
+
+function plannedFiles(task) {
+  const approval = taskApproval(task);
+  return approvalFiles(approval).length ? approvalFiles(approval) : task.metadata?.generated_files || [];
+}
+
+function cleanTaskLogs(task) {
+  const logs = [];
+  for (const event of task.history || []) {
+    const payload = event.payload || {};
+    const message = payload.message || payload.status || payload.result?.response || payload.result?.status || event.eventType;
+    logs.push({
+      label: event.eventType,
+      message: typeof message === "string" ? message : event.eventType,
+      createdAt: event.createdAt
+    });
+  }
+  return logs;
+}
+
+function renderApprovalBanner(task) {
+  const approval = taskApproval(task);
+  if (!approval) {
+    return "";
+  }
+  return `
+    <div class="approval-banner">
+      <strong>Action needed: You must approve file generation.</strong>
+      <span>Coding Agent needs permission to create files.</span>
+      <button type="button" data-page-shortcut="approvals">Go to Approval Queue</button>
+    </div>
+  `;
+}
+
+function renderWhereIsMyApp(task) {
+  const approval = taskApproval(task);
+  const directory = task.metadata?.generated_directory || "terminalx-generated/calculator/";
+  const files = task.metadata?.generated_files || [];
+  return `
+    <div class="where-panel">
+      <strong>Where is my app?</strong>
+      <p>${escapeHtml(approval ? "Files are not created yet. Approve file generation first." : task.status === "completed" ? `Generated files are saved in: ${directory}` : "The agent is still preparing the app files.")}</p>
+      ${files.length ? `<button type="button" data-page-shortcut="files">Open Files</button>` : ""}
+    </div>
+  `;
+}
+
+function renderTaskCard(task) {
+  return `
+    <article class="task-record" id="task-${escapeHtml(task.id)}">
+      ${renderApprovalBanner(task)}
+      <strong>${escapeHtml(task.title)}</strong>
+      <div class="muted">${pill(task.status, task.status)} ${escapeHtml(agentLabel(task.assignedAgentId))}</div>
+      ${renderWorkflowStepper(task)}
+      <div class="task-clean-grid">
+        <div><span>Assigned agent</span><strong>${escapeHtml(agentLabel(task.assignedAgentId))}</strong></div>
+        <div><span>Current status</span><strong>${escapeHtml(taskApproval(task) ? "waiting_approval" : task.status)}</strong></div>
+        <div><span>Next action</span><strong>${escapeHtml(nextActionText(task))}</strong></div>
+      </div>
+      <div class="muted">${escapeHtml(task.description || "No description")}</div>
+    </article>
+  `;
+}
+
+function renderDashboardAlert(approvals) {
+  const element = document.getElementById("dashboard-alert");
+  if (!element) return;
+  if (!approvals.length) {
+    element.classList.add("hidden");
+    element.innerHTML = "";
+    return;
+  }
+  element.classList.remove("hidden");
+  element.innerHTML = `
+    <strong>${escapeHtml(approvals.length)} action${approvals.length === 1 ? "" : "s"} need${approvals.length === 1 ? "s" : ""} your approval</strong>
+    <span>${escapeHtml(approvals[0].title)}</span>
+    <button type="button" data-page-shortcut="approvals">Review approval</button>
+  `;
+}
+
 function renderAgents(elementId, agents) {
   const element = document.getElementById(elementId);
   element.innerHTML = agents
-    .map(
-      (agent) => `
+    .map((agent) => {
+      const waitingTask = dashboardTasks.find((task) => task.assignedAgentId === agent.id && taskApproval(task));
+      const activeTask = dashboardTasks.find((task) => task.assignedAgentId === agent.id && ["running", "assigned", "planned", "created"].includes(task.status));
+      const state = waitingTask ? "Waiting for approval" : activeTask ? "Working on task" : agent.status === "available" ? "Idle" : agent.status;
+      const detail = waitingTask
+        ? `Waiting for your approval on ${waitingTask.title}`
+        : activeTask
+          ? `Working on ${activeTask.title}`
+          : "Available for new work";
+      return `
         <article class="agent-card">
           <div class="agent-card-header">
             <div>
               <strong>${escapeHtml(agent.name)}</strong>
               <div class="agent-type">${escapeHtml(agent.type)}</div>
             </div>
-            ${pill(agent.status, agent.status)}
+            ${pill(state, waitingTask ? "waiting_approval" : activeTask ? "running" : agent.status)}
           </div>
+          <div class="agent-work-state">${escapeHtml(detail)}</div>
           <div class="muted">${escapeHtml(agent.responsibilities.join(", "))}</div>
           <div class="muted">Model: ${escapeHtml(agent.defaultModel)}</div>
         </article>
-      `
-    )
+      `;
+    })
     .join("");
 }
 
@@ -280,7 +442,21 @@ function renderApproval(approval) {
       ${pill(approval.riskLevel, approval.riskLevel)}
       ${pill(approval.status, approval.status)}
     </div>
-    <div class="muted preline">${escapeHtml(approval.description)}</div>
+    <div class="approval-detail-grid">
+      <div><span>Requested by</span><strong>${escapeHtml(agentLabel(approval.requestedBy))}</strong></div>
+      <div><span>Approval needed from</span><strong>You / Admin</strong></div>
+      <div><span>Reason</span><strong>${escapeHtml(approvalReason(approval))}</strong></div>
+      <div><span>Risk level</span><strong>${escapeHtml(approval.riskLevel)}</strong></div>
+    </div>
+    <div>
+      <strong>Files to be created/changed</strong>
+      <ul class="file-plan-list">
+        ${approvalFiles(approval).length
+          ? approvalFiles(approval).map((file) => `<li><span>${escapeHtml(file.path)}</span><small>${escapeHtml(file.purpose || "")}</small></li>`).join("")
+          : `<li><span>No file list provided.</span></li>`}
+      </ul>
+    </div>
+    <div class="muted preline">What happens after approval: Coding Agent resumes, creates the approved files, prepares tests, and marks the task complete or failed.</div>
     ${approvalHelp}
     <div class="button-row">
       <button data-approval-action="approve" data-approval-id="${escapeHtml(approval.id)}" ${approvalDisabled}>Approve</button>
@@ -688,6 +864,8 @@ async function loadDashboard() {
   dashboardTasks = tasks.tasks;
   dashboardFiles = files.files;
   dashboardApprovals = approvals.approvals;
+  dashboardAgents = agents.agents;
+  renderDashboardAlert(approvals.approvals);
   if (actionLog.actions?.length) {
     dashboardActionLog = actionLog.actions;
   }
@@ -704,26 +882,14 @@ async function loadDashboard() {
   renderList(
     "recent-tasks-list",
     tasks.tasks.slice(0, 5),
-    (task) => `
-      <strong>${escapeHtml(task.title)}</strong>
-      <div class="muted">${pill(task.status, task.status)} ${escapeHtml(task.assignedAgentId)}</div>
-      <div class="muted">${escapeHtml(task.description || "No description")}</div>
-    `,
+    renderTaskCard,
     "No tasks yet."
   );
 
   renderList(
     "tasks-list",
     tasks.tasks,
-    (task) => `
-      <article class="task-record" id="task-${escapeHtml(task.id)}">
-      <strong>${escapeHtml(task.title)}</strong>
-      <div class="muted">${pill(task.status, task.status)} ${escapeHtml(task.assignedAgentId)}</div>
-      <div class="muted">${escapeHtml(task.description || "No description")}</div>
-      <div class="muted preline">${escapeHtml(latestTaskOutput(task))}</div>
-      <div class="faint muted">Events: ${escapeHtml(task.history?.length || 0)}</div>
-      </article>
-    `,
+    renderTaskCard,
     "No tasks yet."
   );
 
@@ -1281,31 +1447,59 @@ function renderTaskDrawer(task) {
     return;
   }
   title.textContent = task.title;
+  const files = plannedFiles(task);
+  const logs = cleanTaskLogs(task);
   content.innerHTML = `
     <div class="task-detail-grid">
+      ${renderApprovalBanner(task)}
+      ${renderWhereIsMyApp(task)}
       <div>${pill(task.status, task.status)} ${pill(task.assignedAgentId || "unassigned")}</div>
       <div class="muted">Created ${escapeHtml(formatTime(task.createdAt))}</div>
-      <div class="muted preline">${escapeHtml(task.description || "No description")}</div>
+      ${renderWorkflowStepper(task)}
+      <section class="detail-section">
+        <strong>Task title</strong>
+        <p>${escapeHtml(task.title)}</p>
+      </section>
+      <section class="detail-section">
+        <strong>Assigned agent</strong>
+        <p>${escapeHtml(agentLabel(task.assignedAgentId))}</p>
+      </section>
+      <section class="detail-section">
+        <strong>Current status</strong>
+        <p>${escapeHtml(taskApproval(task) ? "waiting_approval" : task.status)}</p>
+      </section>
       <div>
         <strong>Requirements</strong>
         <ul>${(task.metadata?.requirements || ["No structured requirements yet."]).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
       </div>
       <div>
+        <strong>Planned files</strong>
+        <ul class="file-plan-list">
+          ${files.length
+            ? files.map((file) => `<li><span>${escapeHtml(file.path || file.filename || "Generated file")}</span><small>${escapeHtml(file.purpose || file.file_id || "")}</small></li>`).join("")
+            : `<li><span>No files planned yet.</span></li>`}
+        </ul>
+      </div>
+      <div>
         <strong>Execution logs</strong>
         <div class="stack">
-          ${(task.history || [])
+          ${logs
             .map(
-              (event) => `
+              (log) => `
                 <div class="item">
-                  <strong>${escapeHtml(event.eventType)}</strong>
-                  <div class="muted">${escapeHtml(formatTime(event.createdAt))}</div>
-                  <div class="muted preline">${escapeHtml(JSON.stringify(event.payload, null, 2))}</div>
+                  <strong>${escapeHtml(log.label)}</strong>
+                  <div class="muted">${escapeHtml(formatTime(log.createdAt))}</div>
+                  <div class="muted preline">${escapeHtml(log.message)}</div>
                 </div>
               `
             )
             .join("") || `<div class="item muted">No execution logs yet.</div>`}
         </div>
       </div>
+      <section class="detail-section">
+        <strong>Next action</strong>
+        <p>${escapeHtml(nextActionText(task))}</p>
+      </section>
     </div>
   `;
   drawer.classList.remove("hidden");
@@ -1368,7 +1562,11 @@ async function decideApproval(event) {
     button.textContent = action === "approve" ? "Approve" : "Reject";
     return;
   }
-  showToast(action === "approve" ? "Approval granted" : "Approval rejected", "success");
+  const payload = await response.json();
+  showToast(
+    action === "approve" && payload.resumed?.status === "completed" ? "Approved. Coding Agent created files." : action === "approve" ? "Approval granted" : "Approval rejected",
+    "success"
+  );
   pushActivity(`Approval ${action}d`, "approval");
   await loadDashboard();
 }
@@ -1446,6 +1644,15 @@ document.getElementById("tasks-list").addEventListener("click", (event) => {
   }
   const taskId = record.id.replace(/^task-/, "");
   renderTaskDrawer(dashboardTasks.find((task) => task.id === taskId));
+});
+document.body.addEventListener("click", (event) => {
+  const shortcut = event.target.closest("[data-page-shortcut]");
+  if (!shortcut) {
+    return;
+  }
+  const page = shortcut.dataset.pageShortcut;
+  location.hash = `#${page}`;
+  showPage(page);
 });
 document.getElementById("task-drawer-close").addEventListener("click", () => {
   document.getElementById("task-drawer").classList.add("hidden");

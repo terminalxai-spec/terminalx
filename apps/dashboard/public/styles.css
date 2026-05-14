@@ -506,6 +506,116 @@ h2 {
   display: block;
 }
 
+.dashboard-alert,
+.approval-banner,
+.where-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(255, 214, 102, 0.42);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 16px;
+  background: rgba(255, 214, 102, 0.08);
+  box-shadow: 0 0 24px rgba(255, 214, 102, 0.08);
+}
+
+.dashboard-alert span,
+.approval-banner span,
+.where-panel p {
+  color: var(--muted);
+  margin: 0;
+}
+
+.workflow-stepper {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(68px, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.workflow-step {
+  display: grid;
+  gap: 6px;
+  align-items: start;
+  color: var(--faint);
+}
+
+.workflow-step span {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.22);
+}
+
+.workflow-step.complete span {
+  background: var(--cyan);
+  box-shadow: 0 0 16px rgba(36, 210, 242, 0.5);
+}
+
+.workflow-step.active span {
+  background: var(--amber);
+  box-shadow: 0 0 16px rgba(255, 214, 102, 0.6);
+}
+
+.workflow-step small {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.task-clean-grid,
+.approval-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.approval-detail-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.task-clean-grid div,
+.approval-detail-grid div,
+.detail-section {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(2, 7, 18, 0.38);
+}
+
+.task-clean-grid span,
+.approval-detail-grid span {
+  display: block;
+  color: var(--faint);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.agent-work-state {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: rgba(36, 210, 242, 0.06);
+}
+
+.file-plan-list {
+  display: grid;
+  gap: 8px;
+  padding-left: 18px;
+  margin: 10px 0;
+}
+
+.file-plan-list li span,
+.file-plan-list li small {
+  display: block;
+}
+
+.file-plan-list li small {
+  color: var(--muted);
+}
+
 .active-task {
   outline: 2px solid var(--cyan);
   outline-offset: 4px;
@@ -1336,6 +1446,22 @@ h2 {
 
   .button-row {
     flex-direction: column;
+  }
+
+  .dashboard-alert,
+  .approval-banner,
+  .where-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workflow-stepper {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-clean-grid,
+  .approval-detail-grid {
+    grid-template-columns: 1fr;
   }
 
   .button-row button {

@@ -801,6 +801,30 @@ async function testRbacHttpFlow() {
     assert.equal(commandResult.response.status, 201);
     assert.equal(commandResult.body.status, "completed");
 
+    const buildResult = await request(baseUrl, "/api/command", {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ command: "create simple calculator app" })
+    });
+    assert.equal(buildResult.response.status, 201);
+    assert.equal(buildResult.body.status, "waiting_approval");
+    const pendingApprovals = await request(baseUrl, "/api/approvals?status=pending", { headers: adminHeaders });
+    const calculatorApproval = pendingApprovals.body.approvals.find((approval) => /Build Simple Calculator/i.test(approval.title));
+    assert.ok(calculatorApproval, "Calculator approval should be visible to the admin.");
+    assert.equal(calculatorApproval.requestedBy, "coding-agent");
+    assert.equal(calculatorApproval.proposedAction.proposedFiles.length, 3);
+    const approved = await request(baseUrl, `/api/approvals/${calculatorApproval.id}/approve`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ decidedBy: "admin-test" })
+    });
+    assert.equal(approved.response.status, 200);
+    assert.equal(approved.body.resumed.status, "completed");
+    const calculatorSearch = await request(baseUrl, "/api/tasks/search?q=calculator", { headers: adminHeaders });
+    assert.equal(calculatorSearch.body.tasks[0].status, "completed");
+    const generatedFiles = await request(baseUrl, `/api/files?task_id=${calculatorSearch.body.tasks[0].id}`, { headers: adminHeaders });
+    assert.equal(generatedFiles.body.files.length >= 3, true);
+
     const viewerEmail = `viewer-${Date.now()}@terminalx.local`;
     const viewerRegister = await request(baseUrl, "/api/auth/register", {
       method: "POST",

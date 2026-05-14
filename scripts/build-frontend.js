@@ -63,6 +63,7 @@ assert.match(indexHtml, /id="attachment-preview"/, "Chat page must preview attac
 assert.match(indexHtml, /id="activity-feed"/, "Dashboard must include live activity feed");
 assert.match(indexHtml, /id="toast-region"/, "Dashboard must include toast notifications");
 assert.match(indexHtml, /id="task-drawer"/, "Tasks page must include a task detail drawer");
+assert.match(indexHtml, /id="dashboard-alert"/, "Dashboard must include approval alert area");
 assert.match(indexHtml, /id="file-search-input"/, "Files page must include search");
 assert.match(indexHtml, /id="splash-screen"/, "PWA must include a branded loading splash");
 
@@ -94,6 +95,12 @@ assert.match(appJs, /dragover/, "Dashboard must support drag/drop uploads");
 assert.match(appJs, /showToast/, "Dashboard must show toast notifications");
 assert.match(appJs, /renderActivityFeed/, "Dashboard must render agent activity");
 assert.match(appJs, /renderTaskDrawer/, "Dashboard must render task details");
+assert.match(appJs, /renderWorkflowStepper/, "Task cards must show workflow steps");
+assert.match(appJs, /Action needed: You must approve file generation/, "Waiting approval tasks must explain the human action");
+assert.match(appJs, /Approval needed from/, "Approval cards must explain who approves");
+assert.match(appJs, /Requested by/, "Approval cards must show the requesting agent");
+assert.match(appJs, /Waiting for your approval on/, "Agent cards must show waiting approval work");
+assert.match(appJs, /Where is my app\?/, "Task detail must explain where generated apps live");
 assert.match(appJs, /conversationPreferences/, "Dashboard must support conversation sidebar state");
 assert.match(appJs, /renderChatSelectors/, "Dashboard must populate chat file and task selectors");
 assert.match(appJs, /summarizeSelectedFile/, "Dashboard must summarize selected files");

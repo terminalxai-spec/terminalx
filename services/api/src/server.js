@@ -124,6 +124,68 @@ function systemSnapshot() {
   };
 }
 
+async function resumeApprovedWorkflow(approval, decidedBy = "user") {
+  if (!approval || approval.status !== "approved" || approval.approvalType !== "repo_modification" || !approval.taskId) {
+    return null;
+  }
+
+  const task = database.findTask(approval.taskId);
+  if (!task) {
+    return null;
+  }
+
+  database.appendTaskHistory(task.id, "approval.received", {
+    approval_id: approval.id,
+    decided_by: decidedBy,
+    message: "Approval received"
+  });
+  database.updateTaskStatus(task.id, "running", {
+    approval_id: approval.id,
+    next_action: "Coding Agent is creating approved files."
+  });
+  database.appendTaskHistory(task.id, "coding.creating_files", {
+    message: "Creating files",
+    proposed_files: approval.proposedAction?.proposedFiles || []
+  });
+
+  try {
+    const result = await codingAgent.completeApprovedTask({
+      task: database.findTask(task.id),
+      approval,
+      storeFile: (filePayload) => storageService.upload(filePayload)
+    });
+    database.appendTaskHistory(task.id, "coding.files_created", {
+      message: "Files created",
+      files: result.files,
+      generated_directory: result.generated_directory
+    });
+    database.appendTaskHistory(task.id, "testing.completed", {
+      message: "Running tests",
+      result: "Generated calculator smoke tests were prepared with the files."
+    });
+    database.appendTaskHistory(task.id, "task.completed", result);
+    database.updateTaskStatus(task.id, "completed", {
+      latest_output: result.response,
+      generated_directory: result.generated_directory,
+      generated_files: result.files,
+      next_action: "Open the Files page to review generated files."
+    });
+    return result;
+  } catch (error) {
+    database.appendTaskHistory(task.id, "coding.failed", {
+      message: error.message
+    });
+    database.updateTaskStatus(task.id, "failed", {
+      error: error.message,
+      next_action: "Ask CEO Agent to inspect the failure and retry safely."
+    });
+    return {
+      status: "failed",
+      error: error.message
+    };
+  }
+}
+
 function isProtectedPath(url) {
   return [
     "/api/tasks",
@@ -407,8 +469,11 @@ async function handleApi(req, res, url) {
     if (!requirePermission(req, res, "approvals:approve")) return;
     const approvalId = url.pathname.split("/")[3];
     const payload = await readJsonBody(req);
-    const approval = approvalQueue.decide(approvalId, "approved", payload.decidedBy || "user");
-    return approval ? sendJson(res, 200, { approval }) : notFound(res);
+    const decidedBy = req.currentUser?.email || payload.decidedBy || "user";
+    const approval = approvalQueue.decide(approvalId, "approved", decidedBy);
+    if (!approval) return notFound(res);
+    const resumed = await resumeApprovedWorkflow(approval, decidedBy);
+    return sendJson(res, 200, { approval, resumed });
   }
 
   if (req.method === "POST" && url.pathname.match(/^\/api\/approvals\/[^/]+\/reject$/)) {
