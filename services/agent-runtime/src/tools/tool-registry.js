@@ -4,14 +4,17 @@ const { spawn } = require("node:child_process");
 
 const {
   appendWorkspaceLog,
+  appendChangeHistory,
   createTaskWorkspace,
+  listChangeHistory,
   listWorkspaceFiles,
   listWorkspaceLogs,
+  readWorkspaceFile,
   resolveWorkspacePath
 } = require("../workspace/execution-workspace");
 
 const secretPattern = /(api[_-]?key|secret|token|password)\s*[:=]\s*["']?[^"'\s]+/gi;
-const destructivePattern = /\b(rm\s+-rf|del\s+|remove-item|rmdir|format|shutdown|git\s+reset\s+--hard)\b/i;
+const destructivePattern = /\b(rm\s+-rf|del\s+|remove-item|rmdir|format|shutdown|git\s+reset\s+--hard|npm\s+install\s+-g|pnpm\s+add\s+-g|yarn\s+global|printenv|set\s*$|env\s*$|cat\s+\.env|type\s+\.env)\b/i;
 
 function redactSecrets(value = "") {
   return String(value).replace(secretPattern, "$1=[redacted]");
@@ -58,6 +61,44 @@ function runNodeFile(filePath, cwd) {
       stderr: redactSecrets(stderr)
     }));
   });
+}
+
+function runCommand(command, cwd, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const child = spawn(command[0], command.slice(1), { cwd, shell: false, windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ status: "failed", exitCode: null, stdout: redactSecrets(stdout), stderr: "Command timed out." });
+    }, Math.max(1000, Math.min(Number(timeoutMs || 10000), 30000)));
+    child.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ status: "failed", exitCode: null, stdout: redactSecrets(stdout), stderr: redactSecrets(error.message) });
+    });
+    child.on("close", (exitCode) => {
+      clearTimeout(timer);
+      resolve({ status: exitCode === 0 ? "completed" : "failed", exitCode, stdout: redactSecrets(stdout), stderr: redactSecrets(stderr) });
+    });
+  });
+}
+
+function simpleDiff(before = "", after = "", filePath = "file") {
+  const oldLines = String(before).split(/\r?\n/);
+  const newLines = String(after).split(/\r?\n/);
+  const max = Math.max(oldLines.length, newLines.length);
+  const lines = [`--- ${filePath}`, `+++ ${filePath}`];
+  for (let index = 0; index < max; index += 1) {
+    if (oldLines[index] === newLines[index]) {
+      if (oldLines[index] !== undefined) lines.push(` ${oldLines[index]}`);
+    } else {
+      if (oldLines[index] !== undefined) lines.push(`-${oldLines[index]}`);
+      if (newLines[index] !== undefined) lines.push(`+${newLines[index]}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function stripHtml(html = "") {
@@ -722,6 +763,56 @@ function createToolRegistry(context = {}) {
         return result;
       }
     },
+    "file-explorer": {
+      name: "file-explorer",
+      description: "List workspace files for project chat explorer.",
+      inputSchema: { taskId: "string" },
+      permissionRequired: "files:read",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        const files = listWorkspaceFiles(input.taskId || context.taskId);
+        const result = { status: "listed", files };
+        audit(context, "file-explorer", result);
+        return result;
+      }
+    },
+    "file-preview": {
+      name: "file-preview",
+      description: "Preview a workspace file for project chat.",
+      inputSchema: { taskId: "string", path: "string" },
+      permissionRequired: "files:read",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        const content = readWorkspaceFile(input.taskId || context.taskId, input.path).slice(0, 12000);
+        const result = { status: "previewed", path: input.path, content };
+        audit(context, "file-preview", { status: result.status, path: result.path });
+        return result;
+      }
+    },
+    "workspace-file-list": {
+      name: "workspace-file-list",
+      description: "List files in the active project workspace.",
+      inputSchema: { taskId: "string" },
+      permissionRequired: "files:read",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        return tools["file-explorer"].execute(input);
+      }
+    },
+    "workspace-file-preview": {
+      name: "workspace-file-preview",
+      description: "Preview a file in the active project workspace.",
+      inputSchema: { taskId: "string", path: "string" },
+      permissionRequired: "files:read",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        return tools["file-preview"].execute(input);
+      }
+    },
     "file-edit": {
       name: "file-edit",
       description: "Edit a file inside the task execution workspace.",
@@ -731,6 +822,146 @@ function createToolRegistry(context = {}) {
       approvalRequired: true,
       async execute(input) {
         return tools["file-create"].execute(input);
+      }
+    },
+    "file-propose": {
+      name: "file-propose",
+      description: "Create a before/after diff and approval request for workspace file changes.",
+      inputSchema: { taskId: "string", path: "string", content: "string", delete: "boolean" },
+      permissionRequired: "files:upload",
+      riskLevel: "medium",
+      approvalRequired: true,
+      async execute(input) {
+        const { resolved } = resolveWorkspacePath(input.taskId, "files", input.path);
+        const before = fs.existsSync(resolved) ? fs.readFileSync(resolved, "utf8") : "";
+        const isDelete = Boolean(input.delete);
+        const after = isDelete ? "" : String(input.content || "");
+        const diff = simpleDiff(before, after, input.path);
+        const status = isDelete ? "deleted" : before ? "modified" : "added";
+        const approval = context.approvalQueue?.add({
+          taskId: input.taskId,
+          title: `Approve changes to ${input.path}`,
+          approvalType: "repo_modification",
+          riskLevel: "medium",
+          requestedBy: "terminalx",
+          description: `Approve before applying changes to ${input.path}.`,
+          proposedAction: {
+            tool: "file-edit",
+            files: [{ path: input.path, before, after, diff, status, deleted: isDelete }],
+            diff
+          }
+        });
+        appendChangeHistory(input.taskId, {
+          approvalId: approval?.id,
+          status: "pending",
+          files: [{ path: input.path, before, after, diff, status, deleted: isDelete }],
+          testResult: input.testResult || null
+        });
+        const result = { status: "waiting_approval", message: "Changes ready for review", approvalId: approval?.id, path: input.path, diff };
+        audit(context, "file-propose", result);
+        return result;
+      }
+    },
+    "file-apply-approved": {
+      name: "file-apply-approved",
+      description: "Apply approved file diffs inside the workspace.",
+      inputSchema: { taskId: "string", approvalId: "string" },
+      permissionRequired: "files:upload",
+      riskLevel: "medium",
+      approvalRequired: true,
+      async execute(input) {
+        if (!input.approvalId || !context.approvalQueue?.isApproved(input.approvalId)) {
+          throw new Error("Applying file changes requires approval.");
+        }
+        const approval = context.approvalQueue.get(input.approvalId);
+        const files = approval?.proposedAction?.files || [];
+        const changed = [];
+        for (const file of files) {
+          const { resolved } = resolveWorkspacePath(input.taskId || approval.taskId, "files", file.path);
+          if (file.deleted) {
+            if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+            changed.push({ path: file.path, status: "deleted", diff: file.diff });
+          } else {
+            fs.mkdirSync(path.dirname(resolved), { recursive: true });
+            fs.writeFileSync(resolved, file.after || "", "utf8");
+            changed.push({ path: file.path, status: file.status || (file.before ? "modified" : "added"), diff: file.diff });
+          }
+        }
+        appendChangeHistory(input.taskId || approval.taskId, {
+          approvalId: input.approvalId,
+          status: "accepted",
+          files: changed.map((file) => {
+            const original = files.find((entry) => entry.path === file.path) || {};
+            return { ...file, before: original.before || "", after: original.after || "", deleted: Boolean(original.deleted) };
+          }),
+          testResult: input.testResult || null
+        });
+        const result = { status: "applied", files: changed };
+        audit(context, "file-apply-approved", result);
+        return result;
+      }
+    },
+    "file-reject-change": {
+      name: "file-reject-change",
+      description: "Mark a proposed change as rejected without applying it.",
+      inputSchema: { taskId: "string", approvalId: "string" },
+      permissionRequired: "files:upload",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        const approval = context.approvalQueue?.decide?.(input.approvalId, "rejected", "terminalx");
+        const result = { status: "rejected", approvalId: input.approvalId };
+        appendChangeHistory(input.taskId || approval?.taskId || context.taskId, {
+          approvalId: input.approvalId,
+          status: "rejected",
+          files: approval?.proposedAction?.files || []
+        });
+        audit(context, "file-reject-change", result);
+        return result;
+      }
+    },
+    "file-rollback": {
+      name: "file-rollback",
+      description: "Rollback the last accepted file change in the workspace.",
+      inputSchema: { taskId: "string", changeId: "string" },
+      permissionRequired: "files:upload",
+      riskLevel: "medium",
+      approvalRequired: false,
+      async execute(input) {
+        const taskId = input.taskId || context.taskId;
+        const history = listChangeHistory(taskId);
+        const change = input.changeId
+          ? history.find((entry) => entry.approvalId === input.changeId || entry.createdAt === input.changeId)
+          : history.find((entry) => entry.status === "accepted");
+        if (!change) throw new Error("No accepted change found to rollback.");
+        for (const file of change.files || []) {
+          const { resolved } = resolveWorkspacePath(taskId, "files", file.path);
+          if (file.status === "added" || (!file.before && !file.deleted)) {
+            if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+          } else if (file.before) {
+            fs.mkdirSync(path.dirname(resolved), { recursive: true });
+            fs.writeFileSync(resolved, file.before, "utf8");
+          } else if (fs.existsSync(resolved)) {
+            fs.unlinkSync(resolved);
+          }
+        }
+        const result = { status: "rolled_back", files: (change.files || []).map((file) => file.path) };
+        appendChangeHistory(taskId, { status: "rolled_back", rollbackOf: change.approvalId || change.createdAt, files: change.files || [] });
+        audit(context, "file-rollback", result);
+        return result;
+      }
+    },
+    "change-history": {
+      name: "change-history",
+      description: "List project change history.",
+      inputSchema: { taskId: "string" },
+      permissionRequired: "files:read",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        const result = { status: "listed", changes: listChangeHistory(input.taskId || context.taskId) };
+        audit(context, "change-history", { status: result.status, count: result.changes.length });
+        return result;
       }
     },
     "code-run": {
@@ -755,6 +986,115 @@ function createToolRegistry(context = {}) {
         const result = await runNodeFile(resolved, workspace.filesDir);
         audit(context, "code-run", { command: input.command, ...result });
         return result;
+      }
+    },
+    "terminal-run": {
+      name: "terminal-run",
+      description: "Run a safe terminal command inside the workspace only.",
+      inputSchema: { taskId: "string", command: "array", approvalId: "string", timeoutMs: "number" },
+      permissionRequired: "agents:execute",
+      riskLevel: "high",
+      approvalRequired: true,
+      async execute(input) {
+        const command = Array.isArray(input.command) ? input.command.map(String) : String(input.command || "").trim().split(/\s+/);
+        if (destructivePattern.test(command.join(" "))) throw new Error("Destructive command blocked.");
+        if (!input.approvalId || !context.approvalQueue?.isApproved(input.approvalId)) {
+          throw new Error("Terminal command requires approval.");
+        }
+        const { workspace } = resolveWorkspacePath(input.taskId, "files", "");
+        const result = await runCommand(command, workspace.filesDir, input.timeoutMs);
+        audit(context, "terminal-run", { command: command.join(" "), ...result });
+        return result;
+      }
+    },
+    "git-status": {
+      name: "git-status",
+      description: "Read git status inside the workspace.",
+      inputSchema: { taskId: "string" },
+      permissionRequired: "agents:execute",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        const { workspace } = resolveWorkspacePath(input.taskId, "files", "");
+        const result = await runCommand(["git", "status", "--short"], workspace.filesDir, input.timeoutMs || 10000);
+        audit(context, "git-status", result);
+        return result;
+      }
+    },
+    "git-diff": {
+      name: "git-diff",
+      description: "Read git diff inside the workspace.",
+      inputSchema: { taskId: "string" },
+      permissionRequired: "agents:execute",
+      riskLevel: "low",
+      approvalRequired: false,
+      async execute(input) {
+        const { workspace } = resolveWorkspacePath(input.taskId, "files", "");
+        const result = await runCommand(["git", "diff"], workspace.filesDir, input.timeoutMs || 10000);
+        audit(context, "git-diff", result);
+        return result;
+      }
+    },
+    "git-commit": {
+      name: "git-commit",
+      description: "Commit workspace changes locally.",
+      inputSchema: { taskId: "string", message: "string" },
+      permissionRequired: "agents:execute",
+      riskLevel: "medium",
+      approvalRequired: false,
+      async execute(input) {
+        const { workspace } = resolveWorkspacePath(input.taskId, "files", "");
+        await runCommand(["git", "add", "."], workspace.filesDir, input.timeoutMs || 10000);
+        const result = await runCommand(["git", "commit", "-m", input.message || "TerminalX workspace update"], workspace.filesDir, input.timeoutMs || 10000);
+        audit(context, "git-commit", result);
+        return result;
+      }
+    },
+    "git-branch": {
+      name: "git-branch",
+      description: "Create or switch a git branch inside the workspace.",
+      inputSchema: { taskId: "string", branch: "string" },
+      permissionRequired: "agents:execute",
+      riskLevel: "medium",
+      approvalRequired: false,
+      async execute(input) {
+        const { workspace } = resolveWorkspacePath(input.taskId, "files", "");
+        const result = await runCommand(["git", "checkout", "-B", input.branch || "terminalx-work"], workspace.filesDir, input.timeoutMs || 10000);
+        audit(context, "git-branch", result);
+        return result;
+      }
+    },
+    "git-push": {
+      name: "git-push",
+      description: "Push workspace branch to remote. Requires approval.",
+      inputSchema: { taskId: "string", remote: "string", branch: "string", approvalId: "string" },
+      permissionRequired: "agents:execute",
+      riskLevel: "high",
+      approvalRequired: true,
+      async execute(input) {
+        if (!input.approvalId || !context.approvalQueue?.isApproved(input.approvalId)) {
+          throw new Error("Git push requires human/admin approval.");
+        }
+        const { workspace } = resolveWorkspacePath(input.taskId, "files", "");
+        const result = await runCommand(["git", "push", input.remote || "origin", input.branch || "HEAD"], workspace.filesDir, input.timeoutMs || 30000);
+        audit(context, "git-push", result);
+        return result;
+      }
+    },
+    "git-pr-create": {
+      name: "git-pr-create",
+      description: "Create a pull request through a server provider. Requires approval.",
+      inputSchema: { taskId: "string", approvalId: "string" },
+      permissionRequired: "agents:execute",
+      riskLevel: "high",
+      approvalRequired: true,
+      async execute(input) {
+        if (!input.approvalId || !context.approvalQueue?.isApproved(input.approvalId)) {
+          throw new Error("Pull request creation requires human/admin approval.");
+        }
+        const result = await (context.githubProvider?.createPr?.(input) || providerRequired("GitHub"));
+        audit(context, "git-pr-create", { url: result.url });
+        return { status: "created", ...result };
       }
     },
     "test-run": {

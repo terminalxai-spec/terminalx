@@ -37,7 +37,7 @@
 
     <div id="app-shell" class="app-shell hidden">
       <aside class="sidebar">
-        <a class="brand" href="#command-center" aria-label="TerminalX Command Center">
+        <a class="brand" href="#chat" aria-label="TerminalX Projects">
           <span class="brand-mark pulse-mark">TX</span>
           <span>
             <strong>TerminalX</strong>
@@ -47,13 +47,14 @@
         <button id="sidebar-toggle" class="mini-button sidebar-toggle" type="button">Collapse</button>
 
         <nav class="nav" aria-label="Dashboard pages">
-          <a href="#command-center" class="nav-link active" data-page-link="command-center"><span>⌘</span> Command</a>
-          <a href="#chat" class="nav-link" data-page-link="chat"><span>◌</span> Chat</a>
-          <a href="#agents" class="nav-link" data-page-link="agents"><span>✦</span> Agents</a>
-          <a href="#tasks" class="nav-link" data-page-link="tasks"><span>▣</span> Tasks</a>
+          <a href="#chat" class="nav-link active" data-page-link="chat"><span>◌</span> Projects/Chats</a>
+          <a href="#files" class="nav-link" data-page-link="files"><span>↥</span> Outputs</a>
           <a href="#approvals" class="nav-link" data-page-link="approvals"><span>✓</span> Approvals</a>
-          <a href="#files" class="nav-link" data-page-link="files"><span>↥</span> Files</a>
+          <a href="#workflows" class="nav-link" data-page-link="workflows"><span>WF</span> Bots</a>
           <a href="#settings" class="nav-link" data-page-link="settings"><span>⚙</span> Settings</a>
+          <a href="#command-center" class="nav-link advanced-only" data-page-link="command-center"><span>⌘</span> Command</a>
+          <a href="#tasks" class="nav-link advanced-only" data-page-link="tasks"><span>▣</span> Tasks</a>
+          <a href="#agents" class="nav-link advanced-only" data-page-link="agents"><span>✦</span> Agents</a>
         </nav>
 
         <div class="sidebar-status">
@@ -66,7 +67,7 @@
         <header class="topbar">
           <div>
             <p class="eyebrow">TerminalX Command Layer</p>
-            <h1 id="page-title">Command Center</h1>
+            <h1 id="page-title">Projects / Chats</h1>
           </div>
           <div class="topbar-actions">
             <span id="current-user" class="muted"></span>
@@ -159,7 +160,7 @@
           <div class="chat-shell">
             <aside class="chat-rail panel" aria-label="Conversations">
               <div class="panel-heading">
-                <h2>Conversations</h2>
+                <h2>Projects / Chats</h2>
                 <button id="new-chat-button" class="mini-button" type="button">New</button>
               </div>
               <div class="conversation-tools">
@@ -169,17 +170,28 @@
               <div id="chat-conversation-list" class="chat-conversation-list"></div>
             </aside>
 
-            <article class="chat-thread panel" aria-label="Chat Agent">
+            <article class="chat-thread panel" aria-label="Project chat">
               <div class="panel-heading">
-                <h2>Chat Agent</h2>
+                <h2>Project Workspace</h2>
                 <span id="chat-status" class="panel-kicker">ready</span>
               </div>
               <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+              <div id="chat-review-panel" class="chat-review-panel">
+                <section>
+                  <h3>Changes</h3>
+                  <div id="chat-changes-list" class="stack"></div>
+                </section>
+                <section>
+                  <h3>Files</h3>
+                  <div id="chat-file-tree" class="stack"></div>
+                  <pre id="chat-file-preview" class="file-preview"></pre>
+                </section>
+              </div>
               <div id="chat-typing-indicator" class="typing-indicator hidden" aria-live="polite">
                 <span></span>
                 <span></span>
                 <span></span>
-                Chat Agent is typing
+                Working
               </div>
               <div id="chat-task-result" class="chat-task-result hidden"></div>
               <div id="chat-drop-zone" class="chat-drop-zone hidden">Drop files to attach and upload</div>
@@ -201,7 +213,7 @@
                     id="chat-input"
                     name="message"
                     rows="3"
-                    placeholder="Message TerminalX Chat Agent..."
+                    placeholder="Ask TerminalX to build, edit, test, explain, push, or deploy..."
                   ></textarea>
                   <button id="chat-send-button" type="submit">Send</button>
                   <button id="chat-stop-button" class="secondary-button hidden" type="button">Stop</button>

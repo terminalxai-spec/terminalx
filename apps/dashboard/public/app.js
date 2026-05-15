@@ -1,11 +1,11 @@
 const pageTitles = {
   "command-center": "Command Center",
-  chat: "Chat",
+  chat: "Projects / Chats",
   agents: "Agents",
   workflows: "Workflows",
   tasks: "Tasks",
   approvals: "Approval Queue",
-  files: "Files",
+  files: "Outputs",
   settings: "Settings"
 };
 
@@ -616,7 +616,7 @@ function arrayBufferToBase64(buffer) {
 }
 
 function showPage(pageId) {
-  const nextPage = pageTitles[pageId] ? pageId : "command-center";
+  const nextPage = pageTitles[pageId] ? pageId : "chat";
   document.body.dataset.currentPage = nextPage;
 
   document.querySelectorAll("[data-page]").forEach((page) => {
@@ -853,6 +853,65 @@ function renderChatTaskResult(payload) {
   `;
 }
 
+function renderChatReviewPanel() {
+  const changesList = document.getElementById("chat-changes-list");
+  const fileTree = document.getElementById("chat-file-tree");
+  const preview = document.getElementById("chat-file-preview");
+  if (!changesList || !fileTree || !preview) {
+    return;
+  }
+
+  const reviewApprovals = dashboardApprovals
+    .filter((approval) => approval.approvalType === "repo_modification")
+    .slice(0, 5);
+  changesList.innerHTML = reviewApprovals.length
+    ? reviewApprovals.map((approval) => {
+        const files = approvalFiles(approval);
+        return `
+          <article class="review-card">
+            <strong>Changes ready for review</strong>
+            <p class="muted">${escapeHtml(approval.title || "Workspace change")}</p>
+            <div class="change-file-list">
+              ${files.map((file) => `
+                <details>
+                  <summary>${pill(file.status || "modified", file.status || "modified")} ${escapeHtml(file.path)}</summary>
+                  <pre class="diff-preview">${escapeHtml(file.diff || "")}</pre>
+                </details>
+              `).join("")}
+            </div>
+            <div class="row-actions">
+              <button type="button" data-approval-id="${escapeHtml(approval.id)}" data-approval-action="approve">Approve changes</button>
+              <button class="danger-button" type="button" data-approval-id="${escapeHtml(approval.id)}" data-approval-action="reject">Reject changes</button>
+            </div>
+          </article>
+        `;
+      }).join("")
+    : `<div class="item muted">No pending code changes.</div>`;
+
+  const workspaceFileMap = new Map();
+  for (const task of dashboardTasks) {
+    for (const file of task.metadata?.generated_files || []) {
+      workspaceFileMap.set(file.path || file.filename, { path: file.path || file.filename, content: file.content || "" });
+    }
+  }
+  for (const approval of reviewApprovals) {
+    for (const file of approvalFiles(approval)) {
+      workspaceFileMap.set(file.path, { path: file.path, content: file.after || file.before || "" });
+    }
+  }
+  const workspaceFiles = [...workspaceFileMap.values()].filter((file) => file.path);
+  fileTree.innerHTML = workspaceFiles.length
+    ? workspaceFiles.map((file) => `
+        <button class="file-tree-item" type="button" data-preview-workspace-file="${escapeHtml(file.path)}" data-preview-content="${escapeHtml(file.content || "")}">
+          ${escapeHtml(file.path)}
+        </button>
+      `).join("")
+    : `<div class="item muted">No workspace files yet.</div>`;
+  if (!workspaceFiles.length) {
+    preview.textContent = "";
+  }
+}
+
 function renderChatStatusResult(report) {
   const element = document.getElementById("chat-task-result");
   if (!element) {
@@ -1032,6 +1091,7 @@ async function loadDashboard() {
     providerPill.classList.toggle("offline", runtime.llmProvider.status !== "ready" && runtime.llmProvider.status !== "mock");
   }
   renderChatSelectors(files.files, tasks.tasks);
+  renderChatReviewPanel();
 
   renderAgents("agent-status-cards", agents.agents);
   renderAgents("agents-list", agents.agents);
@@ -1873,6 +1933,18 @@ document.getElementById("tasks-list").addEventListener("click", (event) => {
   const taskId = record.id.replace(/^task-/, "");
   renderTaskDrawer(dashboardTasks.find((task) => task.id === taskId));
 });
+document.getElementById("chat-review-panel")?.addEventListener("click", (event) => {
+  const previewButton = event.target.closest("[data-preview-workspace-file]");
+  if (previewButton) {
+    const preview = document.getElementById("chat-file-preview");
+    preview.textContent = previewButton.dataset.previewContent || "Preview unavailable until changes are applied.";
+    return;
+  }
+  const decisionButton = event.target.closest("[data-approval-id][data-approval-action]");
+  if (decisionButton) {
+    decideApproval({ target: decisionButton });
+  }
+});
 document.getElementById("bot-create-form")?.addEventListener("submit", createBot);
 document.getElementById("workflows")?.addEventListener("click", handleWorkflowClick);
 document.body.addEventListener("click", (event) => {
@@ -1915,6 +1987,9 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+if (!location.hash) {
+  location.hash = "#chat";
+}
 showPage(location.hash.slice(1));
 checkSession()
   .then((authenticated) => {

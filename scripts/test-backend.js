@@ -15,7 +15,8 @@ const { GroqProvider, OllamaProvider, createLlmProvider, parseIntentFromText } =
 const { createApprovalQueue } = require("../services/agent-runtime/src/approvals/queue");
 const { createStorageService } = require("../services/file-service/src/storage");
 const { createToolRegistry } = require("../services/agent-runtime/src/tools/tool-registry");
-const { resolveWorkspacePath } = require("../services/agent-runtime/src/workspace/execution-workspace");
+const { createIntelligenceLayer } = require("../services/agent-runtime/src/intelligence/memory");
+const { createProjectChatWorkspace, createTaskWorkspace, readProjectMemory, resolveWorkspacePath } = require("../services/agent-runtime/src/workspace/execution-workspace");
 const { createWorkflowEngine } = require("../services/agent-runtime/src/workflows/workflow-engine");
 const {
   createSessionToken,
@@ -167,6 +168,72 @@ async function testAutomaticExecutionClassificationAndQuickQuery() {
   repository.close();
 }
 
+async function testUnifiedIntelligenceMemoryLayer() {
+  const repository = createDatabaseRepository({ memory: true });
+  const intelligence = createIntelligenceLayer({ repository });
+  intelligence.remember("coding", "calculator app", {
+    status: "completed",
+    summary: "Calculator app succeeded with input validation tests.",
+    fixes: ["validated divide by zero"]
+  });
+  intelligence.remember("workflow", "bad deploy", {
+    status: "failed",
+    summary: "Deployment failed because package script was missing.",
+    retries: 3
+  });
+  const retrieved = intelligence.retrieve("build calculator with validation", ["coding"]);
+  assert.equal(retrieved[0].summary.includes("Calculator app"), true);
+  const context = intelligence.buildExecutionContext("retry bad deploy");
+  assert.equal(context.avoid_repeated_failure, true);
+  assert.equal(context.decomposed_goal.length > 0, true);
+  assert.equal(intelligence.liveDataNeeded("latest gold rate today"), true);
+  repository.close();
+}
+
+async function testWorkflowLearningPersists() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const intelligence = createIntelligenceLayer({ repository });
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    intelligenceLayer: intelligence
+  });
+  const workflow = engine.createWorkflow({ template_id: "research-workflow", name: "Memory research", goal: "research memory persistence" });
+  engine.startWorkflow(workflow.id);
+  await engine.runBackgroundOnce();
+  await engine.runBackgroundOnce();
+  await engine.runBackgroundOnce();
+  const learned = intelligence.retrieve("memory persistence", ["workflow"]);
+  assert.equal(learned.some((entry) => entry.data.workflow_id === workflow.id && entry.status === "completed"), true);
+  assert.equal(engine.getWorkflow(workflow.id).memory.decomposed_goal.length > 0, true);
+  repository.close();
+}
+
+async function testGoalDecompositionAndAsyncMemoryContext() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const intelligence = createIntelligenceLayer({ repository });
+  intelligence.remember("project", "AI SaaS", { status: "completed", summary: "Use app-builder with approval-gated file writes." });
+  const engine = createWorkflowEngine({
+    repository,
+    approvalQueue,
+    appendTaskHistory: repository.appendTaskHistory.bind(repository),
+    createTask: repository.createTask.bind(repository),
+    intelligenceLayer: intelligence
+  });
+  const workflow = engine.createWorkflow({ template_id: "app-builder", name: "Build AI SaaS", goal: "build AI SaaS" });
+  engine.startWorkflow(workflow.id);
+  const tick = await engine.runBackgroundOnce();
+  assert.equal(["running", "waiting_approval"].includes(tick.status), true);
+  const stored = engine.getWorkflow(workflow.id);
+  assert.equal(stored.context.decomposed_goal?.[0] || stored.memory.decomposed_goal[0], "research market and scope");
+  assert.equal(stored.memory.memory.items.some((entry) => /app-builder/.test(entry.summary)), true);
+  repository.close();
+}
+
 async function testRoutingNarrationNeverAppears() {
   const repository = createDatabaseRepository({ memory: true });
   assert.equal(
@@ -233,7 +300,7 @@ async function testResearchRequestQueuesWorkflow() {
   const result = await chatAgent.respond({ message: "competitor research for TerminalX" });
   assert.equal(result.intent, "action_request");
   assert.equal(result.orchestration.workflow.templateId, "research-workflow");
-  assert.match(result.response, /Workflow created/);
+  assert.match(result.response, /Working/);
   assert.doesNotMatch(result.response, /recommend routing|suggest routing/i);
   repository.close();
 }
@@ -615,6 +682,162 @@ async function testToolAuditFailureDoesNotBreakExecution() {
   const result = await registry.execute("web-search", { query: "gold rate mumbai", limit: 1 });
   assert.equal(result.status, "completed");
   assert.equal(result.results.length, 1);
+}
+
+async function testProjectChatWorkspaceAndMemoryFile() {
+  const repository = createDatabaseRepository({ memory: true });
+  const chatAgent = createChatAgent({
+    conversationRepository: repository,
+    storageService: { read: async () => null },
+    findTask: (taskId) => repository.findTask(taskId)
+  });
+  const result = await chatAgent.respond({ conversation_id: "project_chat_test", message: "create app" });
+  assert.equal(fs.existsSync(resolveWorkspacePath("project_chat_test", "files", "").workspace.root), true);
+  assert.equal(fs.existsSync(path.join(resolveWorkspacePath("project_chat_test", "files", "").workspace.root, "TERMINALX.md")), true);
+  assert.match(readProjectMemory("project_chat_test"), /Project goal/);
+  assert.equal(result.project_workspace.memory_file, "TERMINALX.md");
+  assert.doesNotMatch(result.response, /CEO Agent|Chat Agent|Coding Agent|routing/i);
+  repository.close();
+}
+
+async function testFileEditDiffApprovalAndApply() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const taskId = `diff_project_${Date.now()}`;
+  const registry = createToolRegistry({
+    taskId,
+    agentId: "terminalx",
+    approvalQueue,
+    logAction: repository.logAction.bind(repository),
+    appendTaskHistory: repository.appendTaskHistory.bind(repository)
+  });
+  const proposed = await registry.execute("file-propose", { taskId, path: "app.js", content: "console.log('ok');\n" });
+  assert.equal(proposed.status, "waiting_approval");
+  assert.equal(proposed.message, "Changes ready for review");
+  assert.match(proposed.diff, /\+console\.log/);
+  let history = await registry.execute("change-history", { taskId });
+  assert.equal(history.changes[0].status, "pending");
+  assert.match(history.changes[0].files[0].diff, /\+console\.log/);
+  approvalQueue.decide(proposed.approvalId, "approved", "test");
+  const applied = await registry.execute("file-apply-approved", { taskId, approvalId: proposed.approvalId });
+  assert.equal(applied.status, "applied");
+  assert.equal(fs.readFileSync(resolveWorkspacePath(taskId, "files", "app.js").resolved, "utf8"), "console.log('ok');\n");
+  history = await registry.execute("change-history", { taskId });
+  assert.equal(history.changes[0].status, "accepted");
+
+  const rejectedProposal = await registry.execute("file-propose", { taskId, path: "app.js", content: "console.log('bad');\n" });
+  const rejected = await registry.execute("file-reject-change", { taskId, approvalId: rejectedProposal.approvalId });
+  assert.equal(rejected.status, "rejected");
+  assert.equal(fs.readFileSync(resolveWorkspacePath(taskId, "files", "app.js").resolved, "utf8"), "console.log('ok');\n");
+
+  const explorer = await registry.execute("workspace-file-list", { taskId });
+  assert.equal(explorer.files.some((file) => file.path === "app.js"), true);
+  const preview = await registry.execute("workspace-file-preview", { taskId, path: "app.js" });
+  assert.match(preview.content, /console\.log\('ok'\)/);
+
+  const rollback = await registry.execute("file-rollback", { taskId });
+  assert.equal(rollback.status, "rolled_back");
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "files", "app.js").resolved), false);
+
+  fs.writeFileSync(resolveWorkspacePath(taskId, "files", "delete-me.txt").resolved, "remove me", "utf8");
+  const deleteProposal = await registry.execute("file-propose", { taskId, path: "delete-me.txt", delete: true });
+  approvalQueue.decide(deleteProposal.approvalId, "approved", "test");
+  const deleted = await registry.execute("file-apply-approved", { taskId, approvalId: deleteProposal.approvalId });
+  assert.equal(deleted.files[0].status, "deleted");
+  assert.equal(fs.existsSync(resolveWorkspacePath(taskId, "files", "delete-me.txt").resolved), false);
+  repository.close();
+}
+
+async function testTerminalAndGitSafetyTools() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const registry = createToolRegistry({
+    taskId: "terminal_project",
+    agentId: "terminalx",
+    approvalQueue,
+    logAction: repository.logAction.bind(repository),
+    appendTaskHistory: repository.appendTaskHistory.bind(repository)
+  });
+  await assert.rejects(
+    () => registry.execute("terminal-run", { taskId: "terminal_project", command: [process.execPath, "-e", "console.log('x')"] }),
+    /requires approval/
+  );
+  const approval = approvalQueue.add({ taskId: "terminal_project", title: "Approve terminal", approvalType: "shell_command", riskLevel: "medium", requestedBy: "terminalx" });
+  approvalQueue.decide(approval.id, "approved", "test");
+  const ran = await registry.execute("terminal-run", {
+    taskId: "terminal_project",
+    command: [process.execPath, "-e", "console.log(process.cwd())"],
+    approvalId: approval.id
+  });
+  assert.equal(ran.status, "completed");
+  assert.match(ran.stdout.replaceAll("\\", "/"), /storage\/workspaces\/projects\/terminal_project\/files/);
+  await assert.rejects(
+    () => registry.execute("git-push", { taskId: "terminal_project", remote: "origin", branch: "main" }),
+    /requires human\/admin approval/
+  );
+  await assert.rejects(
+    () => registry.execute("terminal-run", { taskId: "terminal_project", command: "rm -rf .", approvalId: approval.id }),
+    /Destructive command blocked/
+  );
+  await assert.rejects(
+    () => registry.execute("terminal-run", { taskId: "terminal_project", command: "printenv", approvalId: approval.id }),
+    /Destructive command blocked/
+  );
+  repository.close();
+}
+
+async function testRepositoryUnderstandingBeforeEdit() {
+  const repository = createDatabaseRepository({ memory: true });
+  const approvalQueue = createApprovalQueue(repository);
+  const task = repository.createTask({
+    title: "Improve existing UI",
+    description: "edit existing app file",
+    assignedAgentId: "coding-agent",
+    intent: "coding"
+  });
+  const workspace = createTaskWorkspace(task);
+  fs.writeFileSync(path.join(workspace.filesDir, "package.json"), JSON.stringify({ scripts: { test: "node app.test.js", build: "node build.js" } }), "utf8");
+  fs.writeFileSync(path.join(workspace.filesDir, "app.js"), "console.log('original');\n", "utf8");
+  fs.writeFileSync(path.join(workspace.filesDir, "app.test.js"), "console.log('ok');\n", "utf8");
+  const profile = codingAgent.inspectProjectWorkspace(task);
+  assert.equal(profile.projectType, "node");
+  assert.equal(profile.packageManager, "npm");
+  assert.equal(profile.testCommand, "npm test");
+  assert.equal(profile.buildCommand, "npm run build");
+  assert.match(profile.projectMemory, /Project goal/);
+
+  const planned = codingAgent.executeAssignedTask({ task, command: task.description, approvalQueue });
+  const approval = approvalQueue.get(planned.approval_id);
+  assert.equal(approval.proposedAction.repositoryUnderstanding.testCommand, "npm test");
+  assert.equal(approval.proposedAction.proposedFiles.some((file) => file.path === "app.js" && file.existing), true);
+  approvalQueue.decide(approval.id, "approved", "test");
+  const result = await codingAgent.completeApprovedTask({
+    task,
+    approval,
+    toolRegistry: createToolRegistry({
+      taskId: task.id,
+      agentId: "terminalx",
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository)
+    }),
+    storeFile: async (filePayload) => repository.upsertFile({
+      id: `file_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      task_id: filePayload.task_id,
+      filename: filePayload.filename,
+      path: filePayload.path,
+      mime_type: filePayload.mime_type,
+      size_bytes: Buffer.byteLength(filePayload.content || ""),
+      provider: "local",
+      bucket: "local",
+      onlineConfigured: false,
+      metadata: filePayload.metadata || {}
+    })
+  });
+  assert.match(fs.readFileSync(path.join(workspace.filesDir, "app.js"), "utf8"), /original/);
+  assert.match(result.response, /Files changed/);
+  assert.doesNotMatch(result.response, /Coding Agent|CEO Agent|routing/i);
+  repository.close();
 }
 
 async function testDynamicCodingGeneration() {
@@ -1462,8 +1685,8 @@ async function testChatStatusUsesSystemSnapshot() {
   });
   const result = await chatAgent.respond({ message: "CEO, what is the current status of all agents?" });
   assert.equal(result.intent, "agent_status");
-  assert.match(result.response, /CEO Agent agent status report/);
-  assert.match(result.response, /Coding Agent/);
+  assert.match(result.response, /Status report/);
+  assert.doesNotMatch(result.response, /CEO Agent|Coding Agent|Chat Agent|Research Agent/);
   repository.close();
 }
 
@@ -1549,7 +1772,7 @@ async function testStatusReportDedupesRepeatedChatTasks() {
   const result = await chatAgent.respond({ message: "what is going on" });
   assert.equal(result.intent, "system_status");
   assert.match(result.response, /Latest unique tasks/);
-  assert.equal((result.response.match(/Chat Agent: hello/g) || []).length, 1);
+  assert.doesNotMatch(result.response, /Chat Agent|Coding Agent|CEO Agent/);
   assert.match(result.response, /waiting_approval: 1/);
   repository.close();
 }
@@ -1675,7 +1898,7 @@ async function testRbacHttpFlow() {
     const pendingApprovals = await request(baseUrl, "/api/approvals?status=pending", { headers: adminHeaders });
     const calculatorApproval = pendingApprovals.body.approvals.find((approval) => approval.approvalType === "repo_modification");
     assert.ok(calculatorApproval, "Calculator approval should be visible to the admin.");
-    assert.equal(calculatorApproval.requestedBy, "coding-agent");
+    assert.equal(calculatorApproval.requestedBy, "terminalx");
     assert.equal(calculatorApproval.proposedAction.proposedFiles.length, 3);
     const approved = await request(baseUrl, `/api/approvals/${calculatorApproval.id}/approve`, {
       method: "POST",
@@ -1791,6 +2014,9 @@ async function main() {
   await testCeoCreatesCodingBuildTask();
   await testChatEscalatesActionRequests();
   await testAutomaticExecutionClassificationAndQuickQuery();
+  await testUnifiedIntelligenceMemoryLayer();
+  await testWorkflowLearningPersists();
+  await testGoalDecompositionAndAsyncMemoryContext();
   await testRoutingNarrationNeverAppears();
   await testFailedQuickQueryReturnsConciseError();
   await testResearchRequestQueuesWorkflow();
@@ -1800,6 +2026,10 @@ async function main() {
   await testFileStorageProviders();
   await testExecutionWorkspaceTools();
   await testToolAuditFailureDoesNotBreakExecution();
+  await testProjectChatWorkspaceAndMemoryFile();
+  await testFileEditDiffApprovalAndApply();
+  await testTerminalAndGitSafetyTools();
+  await testRepositoryUnderstandingBeforeEdit();
   await testDynamicCodingGeneration();
   await testCodingAgentSelfFixLoop();
   await testCodingAgentRetryLimitEnforced();

@@ -17,7 +17,8 @@ const { createApprovalQueue } = require("../../agent-runtime/src/approvals/queue
 const { getRuntimeConfig } = require("../../agent-runtime/src/config/runtime");
 const { createLlmProvider } = require("../../agent-runtime/src/llm/provider");
 const { createToolRegistry } = require("../../agent-runtime/src/tools/tool-registry");
-const { createTaskWorkspace, listWorkspaceFiles, listWorkspaceLogs } = require("../../agent-runtime/src/workspace/execution-workspace");
+const { createIntelligenceLayer } = require("../../agent-runtime/src/intelligence/memory");
+const { createProjectChatWorkspace, createTaskWorkspace, listWorkspaceFiles, listWorkspaceLogs } = require("../../agent-runtime/src/workspace/execution-workspace");
 const { createWorkflowEngine } = require("../../agent-runtime/src/workflows/workflow-engine");
 const { createStorageService } = require("../../file-service/src/storage");
 const { hasPermission, seedRbac } = require("./rbac");
@@ -73,6 +74,7 @@ const storageService = createStorageService({
   appendTaskHistory
 });
 const llmProvider = createLlmProvider();
+const intelligenceLayer = createIntelligenceLayer({ repository: database });
 const workflowEngine = createWorkflowEngine({
   repository: database,
   approvalQueue,
@@ -80,6 +82,7 @@ const workflowEngine = createWorkflowEngine({
   createTask,
   executeCodingTask: codingAgent.executeAssignedTask,
   toolRegistryFactory: taskToolRegistry,
+  intelligenceLayer,
   workflowTimeoutMs: Number(process.env.WORKFLOW_TIMEOUT_MS || 30000),
   maxConcurrentWorkflows: Number(process.env.WORKFLOW_MAX_CONCURRENT || 1)
 });
@@ -118,7 +121,7 @@ function formatQuickQueryAnswer(message, summary, sources = []) {
   ].filter(Boolean).join("\n");
 }
 
-async function executeQuickQuery({ message }) {
+async function executeQuickQuery({ message, memoryContext = null }) {
   const registry = createToolRegistry({
     agentId: "research-agent",
     logAction: database.logAction?.bind(database)
@@ -142,6 +145,13 @@ async function executeQuickQuery({ message }) {
       });
     }
     const summary = await registry.execute("summarize-content", { query: message, documents });
+    intelligenceLayer.remember("research", message, {
+      status: "completed",
+      summary: summary.summary,
+      sources: search.results || [],
+      refreshed_at: new Date().toISOString(),
+      used_memory: memoryContext?.summary || ""
+    });
     return {
       status: "completed",
       response: formatQuickQueryAnswer(message, summary, search.results || []),
@@ -169,13 +179,26 @@ function workflowTemplateForExecution(command, executionClass) {
   return "ai-news-summary";
 }
 
-function startAutonomousWorkflow({ command, executionClass }) {
+function startAutonomousWorkflow({ command, executionClass, conversationId = null }) {
   const resolvedClass = executionClass || classifyExecutionRequest(command);
+  const executionContext = intelligenceLayer.buildExecutionContext(command);
+  const projectWorkspace = createProjectChatWorkspace(conversationId || `project-${Date.now()}`, command);
   const workflow = workflowEngine.createWorkflow({
     template_id: workflowTemplateForExecution(command, resolvedClass),
     name: String(command || "TerminalX workflow").slice(0, 80),
     goal: command,
-    context: { topic: command, command }
+    context: {
+      topic: command,
+      command,
+      memory_context: executionContext.memory,
+      avoid_repeated_failure: executionContext.avoid_repeated_failure,
+      avoid_failure_summary: executionContext.avoid_failure_summary,
+      decomposed_goal: executionContext.decomposed_goal,
+      project_workspace: projectWorkspace.relativeRoot,
+      project_memory: "TERMINALX.md",
+      linked_files: projectWorkspace.linkedFiles,
+      linked_outputs: projectWorkspace.linkedOutputs
+    }
   });
   const started = workflowEngine.startWorkflow(workflow.id);
   pumpWorkflowWorker();
@@ -198,15 +221,16 @@ const chatAgent = createChatAgent({
   findTask,
   llmProvider,
   executeQuickQuery,
+  getMemoryContext: (message) => intelligenceLayer.summarize(message),
   getSystemStatus: () => ({
     agents: agentRegistry,
     tasks: database.listTasks(),
     approvals: approvalQueue.list({ status: "pending" }),
     files: database.listFiles ? database.listFiles() : []
   }),
-  orchestrateAction: ({ command, executionMode, executionClass }) => {
+  orchestrateAction: ({ command, executionMode, executionClass, conversationId }) => {
     if (executionMode !== "plan") {
-      return startAutonomousWorkflow({ command, executionClass });
+      return startAutonomousWorkflow({ command, executionClass, conversationId });
     }
     return handleCommandWithAi({
       command,
@@ -674,7 +698,7 @@ async function handleApi(req, res, url) {
       });
     }
     if (executionClass !== "none" && (payload.execution_mode || payload.executionMode || "execution") !== "plan") {
-      return sendJson(res, 202, startAutonomousWorkflow({ command: payload.command, executionClass }));
+      return sendJson(res, 202, startAutonomousWorkflow({ command: payload.command, executionClass, conversationId: payload.conversation_id || payload.conversationId }));
     }
     const result = await handleCommandWithAi({
       command: payload.command,

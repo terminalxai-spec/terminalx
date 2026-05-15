@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const path = require("node:path");
 
 const {
@@ -9,7 +10,7 @@ const {
 } = require("../tools/file-tool");
 const { runCommand } = require("../tools/command-tool");
 const { getGitHubPlaceholder } = require("../integrations/github-placeholder");
-const { createTaskWorkspace } = require("../workspace/execution-workspace");
+const { createTaskWorkspace, readProjectMemory, resolveWorkspacePath } = require("../workspace/execution-workspace");
 
 function codingWorkspaceRoot() {
   return path.resolve(process.env.TERMINALX_WORKSPACE_ROOT || process.cwd());
@@ -42,16 +43,70 @@ function projectSlug(task, command) {
   return "implementation";
 }
 
+function listWorkspaceTree(taskOrId) {
+  const workspace = createTaskWorkspace(taskOrId);
+  if (!fs.existsSync(workspace.filesDir)) return [];
+  const walk = (dir, base = workspace.filesDir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return walk(full, base);
+    return path.relative(base, full).replaceAll("\\", "/");
+  });
+  return walk(workspace.filesDir);
+}
+
+function readWorkspaceFile(taskOrId, filePath) {
+  const { resolved } = resolveWorkspacePath(taskOrId, "files", filePath);
+  return fs.existsSync(resolved) ? fs.readFileSync(resolved, "utf8") : "";
+}
+
+function inspectProjectWorkspace(taskOrId) {
+  const files = listWorkspaceTree(taskOrId);
+  const has = (name) => files.includes(name);
+  const packageJson = has("package.json") ? JSON.parse(readWorkspaceFile(taskOrId, "package.json") || "{}") : null;
+  const projectMemory = readProjectMemory(typeof taskOrId === "string" ? taskOrId : taskOrId?.id);
+  const packageManager = has("pnpm-lock.yaml") ? "pnpm" : has("yarn.lock") ? "yarn" : has("package-lock.json") || packageJson ? "npm" : "none";
+  const projectType = packageJson
+    ? "node"
+    : files.some((file) => /\.html$/i.test(file))
+      ? "static-web"
+      : files.some((file) => /\.py$/i.test(file))
+        ? "python"
+        : "unknown";
+  return {
+    files,
+    relevantFiles: files.filter((file) => /^(package\.json|TERMINALX\.md|src\/|app\.|index\.|server\.|.*\.test\.)/i.test(file)).slice(0, 12),
+    projectMemory,
+    projectType,
+    packageManager,
+    testCommand: packageJson?.scripts?.test ? `${packageManager} test` : files.find((file) => /\.test\.js$/i.test(file)) ? `node ${files.find((file) => /\.test\.js$/i.test(file))}` : null,
+    buildCommand: packageJson?.scripts?.build ? `${packageManager} run build` : null
+  };
+}
+
 function projectPlanForTask(task, command) {
   const requirements = task.metadata?.requirements || [];
+  const inspection = inspectProjectWorkspace(task);
   const slug = projectSlug(task, command);
   const root = `terminalx-generated/${slug}`;
   const base = {
     slug,
     root,
     requirements,
+    inspection,
     summary: `Lightweight ${slug.replaceAll("-", " ")} generated from task requirements.`
   };
+
+  if (inspection.files.length && /\b(edit|fix|improve|update|change)\b/i.test(`${task.title} ${task.description} ${command}`)) {
+    const target = inspection.files.find((file) => /app\.js$|server\.js$|index\.html$|styles\.css$/i.test(file)) || inspection.files[0];
+    return {
+      ...base,
+      root: path.dirname(target) === "." ? "" : path.dirname(target).replaceAll("\\", "/"),
+      files: [
+        { path: target, purpose: "Minimal focused change to existing project file.", existing: true },
+        { path: "README.md", purpose: "Update project notes after the change.", existing: inspection.files.includes("README.md") }
+      ]
+    };
+  }
 
   if (slug === "calculator") {
     return {
@@ -111,34 +166,37 @@ function executeAssignedTask({ task, command, approvalQueue }) {
   const proposedFiles = proposedFilesForTask(task, command);
   const workspace = createTaskWorkspace(task);
   const approval = approvalQueue?.add?.({
-    title: `Approve Coding Agent file generation for ${task.title}`,
+    title: `Approve file changes for ${task.title}`,
     taskId: task.id,
-    requestedBy: "coding-agent",
-    assignedAgentId: "coding-agent",
+    requestedBy: "terminalx",
+    assignedAgentId: "terminalx",
     approvalType: "repo_modification",
     riskLevel: "medium",
-    description: "Coding Agent prepared a file-generation workflow. Approval is required before writing files.",
+    description: "TerminalX prepared file changes. Approval is required before writing files.",
     proposedAction: {
       command,
       workspace: workspace.relativeRoot,
       projectPlan: projectPlanForTask(task, command),
       proposedFiles,
+      internalPlan: ["Inspect workspace", "Read TERMINALX.md", "Apply minimal changes", "Run detected tests/build", "Self-fix failures up to 3 times"],
+      repositoryUnderstanding: inspectProjectWorkspace(task),
       requirements: task.metadata?.requirements || []
     }
   });
 
   return {
-    agent: "coding-agent",
+    agent: "terminalx",
     action: "execute_assigned_task",
     status: approval ? "approval_required" : "planned",
     approval_required: Boolean(approval),
     approval_id: approval?.id || null,
     response: approval
-      ? "Coding Agent analyzed the task and prepared file changes. Approval is required before writing to the workspace."
-      : "Coding Agent analyzed the task and prepared an implementation plan.",
+      ? "I’m working on it. Approval is needed before applying file changes."
+      : "I’m working on it.",
     logs: [
       `Workspace prepared: ${workspace.relativeRoot}`,
-      "Coding Agent received assigned task",
+      "Read project workspace",
+      "Read TERMINALX.md",
       "Requirements parsed",
       "Implementation files planned",
       approval ? "Approval requested for repo modification" : "No approval queue available"
@@ -225,7 +283,7 @@ console.log("Calculator tests passed.");
         : "node app.test.js";
     return `# ${task.title}
 
-Generated by TerminalX Coding Agent after human approval.
+Generated by TerminalX after human approval.
 
 ## Original request
 
@@ -402,7 +460,7 @@ console.log("Static app tests passed.");
 
   return `# ${task.title}
 
-Generated by TerminalX Coding Agent.
+Generated by TerminalX.
 
 Purpose: ${file.purpose || "Task artifact"}
 
@@ -435,13 +493,16 @@ async function runGeneratedTests({ task, approval, toolRegistry, testFile }) {
 
 async function completeApprovedTask({ task, approval, storeFile, toolRegistry }) {
   const proposedFiles = approval?.proposedAction?.proposedFiles || [];
+  const repositoryUnderstanding = approval?.proposedAction?.repositoryUnderstanding || inspectProjectWorkspace(task);
   const workspace = createTaskWorkspace(task);
   const createdFiles = [];
-  const logs = ["Approval received", "generating"];
+  const logs = ["Approval received", "repository_understanding", "generating"];
   const iterationHistory = [];
 
   for (const file of proposedFiles) {
-    const content = fileContentForTask(file, task, approval);
+    const before = file.existing ? readWorkspaceFile(task, file.path) : "";
+    const generated = fileContentForTask(file, task, approval);
+    const content = file.existing && before ? `${before.trimEnd()}\n\n/* TerminalX update */\n${generated}` : generated;
     const workspaceWrite = await toolRegistry.execute("file-create", {
       taskId: task.id,
       path: file.path,
@@ -470,7 +531,7 @@ async function completeApprovedTask({ task, approval, storeFile, toolRegistry })
 
   logs.push("Files created");
   logs.push("testing");
-  const testFile = proposedFiles.find((file) => /\.test\.js$/i.test(file.path))?.path;
+  const testFile = proposedFiles.find((file) => /\.test\.js$/i.test(file.path))?.path || (repositoryUnderstanding.testCommand?.startsWith("node ") ? repositoryUnderstanding.testCommand.replace(/^node\s+/, "") : null);
   let testResult = await runGeneratedTests({ task, approval, toolRegistry, testFile });
   iterationHistory.push({ iteration: 1, phase: "testing", testResult });
 
@@ -521,12 +582,18 @@ async function completeApprovedTask({ task, approval, storeFile, toolRegistry })
   logs.push("saving_outputs");
 
   return {
-    agent: "coding-agent",
+    agent: "terminalx",
     action: "complete_approved_task",
     status: testResult.status === "passed" || testResult.status === "no_tests_found" ? "completed" : "failed",
-    response: `Coding Agent created ${createdFiles.length} approved file(s).`,
+    response: [
+      `Files changed: ${createdFiles.length}`,
+      `Tests: ${testResult.status}`,
+      `Output: ${workspace.relativeRoot}/outputs/result.json`,
+      testResult.status === "passed" || testResult.status === "no_tests_found" ? "Next: review outputs or ask me to push/deploy." : "Next: review test errors and ask me to continue fixing."
+    ].join("\n"),
     logs,
     workspace: workspace.relativeRoot,
+    repository_understanding: repositoryUnderstanding,
     generated_directory: proposedFiles[0]?.path?.split("/").slice(0, -1).join("/") || "terminalx-generated/",
     files: createdFiles,
     test_result: testResult,
@@ -587,6 +654,7 @@ module.exports = {
   executeAssignedTask,
   executeCommand,
   githubStatus,
+  inspectProjectWorkspace,
   modifyFile,
   readFile,
   suggestChange

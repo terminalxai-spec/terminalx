@@ -79,6 +79,14 @@ button:hover {
   display: none !important;
 }
 
+.advanced-only {
+  display: none;
+}
+
+body.advanced-mode .advanced-only {
+  display: flex;
+}
+
 .splash-screen {
   position: fixed;
   inset: 0;
@@ -943,6 +951,49 @@ h2 {
   padding: 0;
   background: transparent;
   color: #d7f7ff;
+}
+
+.chat-review-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.7fr);
+  gap: 14px;
+}
+
+.review-card,
+.file-tree-item {
+  width: 100%;
+  border: 1px solid rgba(72, 229, 255, 0.22);
+  border-radius: 12px;
+  background: rgba(5, 10, 24, 0.72);
+  color: var(--text);
+  text-align: left;
+}
+
+.review-card {
+  padding: 14px;
+}
+
+.file-tree-item {
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.change-file-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.diff-preview,
+.file-preview {
+  overflow: auto;
+  max-height: 240px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(72, 229, 255, 0.16);
+  background: rgba(0, 0, 0, 0.28);
+  color: #d8f7ff;
+  white-space: pre-wrap;
 }
 
 .chat-composer {

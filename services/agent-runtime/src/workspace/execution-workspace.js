@@ -35,6 +35,54 @@ function createTaskWorkspace(taskOrId) {
   };
 }
 
+function createProjectChatWorkspace(conversationId, goal = "") {
+  const workspace = createTaskWorkspace(conversationId || "project-chat");
+  const memoryPath = path.join(workspace.root, "TERMINALX.md");
+  if (!fs.existsSync(memoryPath)) {
+    fs.writeFileSync(memoryPath, [
+      "# TerminalX Project Memory",
+      "",
+      `Project goal: ${goal || "Not set yet."}`,
+      "",
+      "## User preferences",
+      "- Chat-first normal mode",
+      "- Hide internal routing unless advanced mode is enabled",
+      "",
+      "## Architecture notes",
+      "- Workspace files live under files/",
+      "- Outputs live under outputs/",
+      "",
+      "## Known issues",
+      "- None recorded yet.",
+      "",
+      "## Successful fixes",
+      "- None recorded yet.",
+      "",
+      "## Deployment notes",
+      "- No deployment linked yet."
+    ].join("\n"), "utf8");
+  }
+  return {
+    ...workspace,
+    memoryPath,
+    linkedFiles: listWorkspaceFiles(conversationId || "project-chat"),
+    linkedOutputs: listFilesRecursive(workspace.outputsDir),
+    git: { repo: null, branch: null },
+    deploymentUrl: null
+  };
+}
+
+function readProjectMemory(conversationId) {
+  const workspace = createProjectChatWorkspace(conversationId);
+  return fs.existsSync(workspace.memoryPath) ? fs.readFileSync(workspace.memoryPath, "utf8") : "";
+}
+
+function appendProjectMemory(conversationId, section, content) {
+  const workspace = createProjectChatWorkspace(conversationId);
+  fs.appendFileSync(workspace.memoryPath, `\n\n## ${section}\n${content}\n`, "utf8");
+  return readProjectMemory(conversationId);
+}
+
 function assertInside(parent, target) {
   const parentPath = path.resolve(parent);
   const targetPath = path.resolve(target);
@@ -77,6 +125,31 @@ function listWorkspaceFiles(taskOrId) {
   return listFilesRecursive(workspace.filesDir);
 }
 
+function readWorkspaceFile(taskOrId, relativePath) {
+  const { resolved } = resolveWorkspacePath(taskOrId, "files", relativePath);
+  return fs.existsSync(resolved) ? fs.readFileSync(resolved, "utf8") : "";
+}
+
+function changeHistoryPath(taskOrId) {
+  const { workspace } = resolveWorkspacePath(taskOrId, "outputs", "");
+  return path.join(workspace.outputsDir, "change-history.json");
+}
+
+function listChangeHistory(taskOrId) {
+  const filePath = changeHistoryPath(taskOrId);
+  if (!fs.existsSync(filePath)) return [];
+  return JSON.parse(fs.readFileSync(filePath, "utf8") || "[]");
+}
+
+function appendChangeHistory(taskOrId, entry) {
+  const history = listChangeHistory(taskOrId);
+  history.unshift({ ...entry, createdAt: entry.createdAt || new Date().toISOString() });
+  const filePath = changeHistoryPath(taskOrId);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(history, null, 2), "utf8");
+  return history[0];
+}
+
 function listWorkspaceLogs(taskOrId) {
   const workspace = createTaskWorkspace(taskOrId);
   return listFilesRecursive(workspace.logsDir).map((entry) => ({
@@ -93,9 +166,15 @@ function appendWorkspaceLog(taskOrId, name, content) {
 
 module.exports = {
   appendWorkspaceLog,
+  appendProjectMemory,
+  appendChangeHistory,
+  createProjectChatWorkspace,
   createTaskWorkspace,
+  listChangeHistory,
   listWorkspaceFiles,
   listWorkspaceLogs,
+  readProjectMemory,
+  readWorkspaceFile,
   resolveWorkspacePath,
   slugForTask,
   workspaceBaseRoot

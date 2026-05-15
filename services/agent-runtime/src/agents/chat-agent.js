@@ -1,3 +1,5 @@
+const { createProjectChatWorkspace, readProjectMemory } = require("../workspace/execution-workspace");
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -368,12 +370,12 @@ function buildAgentStatus(snapshot = {}) {
   }
 
   const response = [
-    "CEO Agent agent status report:",
+    "Status report:",
     "",
     ...(agents.length
-      ? agents.map((agent) => {
+      ? agents.map((agent, index) => {
           const counts = byAgent.get(agent.id) || { total: 0, active: 0 };
-          return `- ${agent.name}: ${agent.status || "available"} | active tasks ${counts.active} | total tasks ${counts.total}`;
+          return `- Worker ${index + 1}: ${agent.status || "available"} | active tasks ${counts.active} | total tasks ${counts.total}`;
         })
       : ["- No registered agents found."])
   ].join("\n");
@@ -391,7 +393,7 @@ function buildApprovalStatus(snapshot = {}, message = "") {
     kind: "approval_status",
     approvals: matches,
     response: [
-      "CEO Agent approval status:",
+    "Approval status:",
       ...(matches.length
         ? matches.map((approval) => `- ${approval.title} | ${approval.status} | ${approval.approvalType || approval.approval_type || "approval"} | ${approval.riskLevel || approval.risk_level || "risk unknown"}`)
         : ["- No pending approvals match this request."])
@@ -410,7 +412,7 @@ function buildFileStatus(snapshot = {}, message = "") {
     kind: "file_status",
     files: matches,
     response: [
-      "CEO Agent file status:",
+    "File status:",
       ...(matches.length
         ? matches.slice(0, 10).map((file) => `- ${file.filename || file.id} | ${file.provider || file.storage_provider || "storage"} | ${file.size_bytes || file.size || 0} bytes`)
         : ["- No files match this request."])
@@ -429,7 +431,7 @@ function buildSystemStatus(snapshot = {}) {
   }));
 
   const response = [
-    "CEO Agent status report:",
+    "System status:",
     `- Agents online: ${agents.length || "unknown"}`,
     `- Total tasks: ${tasks.length}`,
     `- Pending approvals: ${approvals.length}`,
@@ -493,8 +495,7 @@ async function summarizeFile(fileId, storageService) {
 
 function answerGeneralQuestion(message) {
   return [
-    "I am the TerminalX Chat Agent.",
-    "I can answer general questions, summarize uploaded files, explain tasks, and help plan work.",
+    "I can help with this project, answer questions, summarize files, explain tasks, and plan work.",
     `Request received: ${message}`
   ].join("\n");
 }
@@ -520,6 +521,7 @@ function removeRoutingNarration(text = "") {
     .replace(/\b(?:please\s+)?(?:route|routing)\s+this\s+(request|query)[^.\n]*[.\n]?/gi, "")
     .replace(/\blet the CEO Agent know[^.\n]*(route|routing)[^.\n]*[.\n]?/gi, "")
     .replace(/\b(?:the\s+)?WebSearch Agent[^.\n]*(fetch|search|provide)[^.\n]*[.\n]?/gi, "")
+    .replace(/\b(CEO Agent|Chat Agent|Coding Agent|Testing Agent|Content Agent|Trading Agent)\b/gi, "TerminalX")
     .replace(/would start by routing or planning around:/gi, "Request received:")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -565,6 +567,7 @@ function createChatAgent({
   llmProvider = null,
   orchestrateAction = null,
   executeQuickQuery = null,
+  getMemoryContext = null,
   getSystemStatus = null
 }) {
   function getOrCreateConversation(conversationId) {
@@ -632,11 +635,19 @@ function createChatAgent({
     }
 
     const conversation = getOrCreateConversation(payload.conversation_id);
+    const projectWorkspace = createProjectChatWorkspace(conversation.id, message);
+    const projectMemory = readProjectMemory(conversation.id);
     const intent = classifyChatIntent(message, payload);
+    const memoryContext = typeof getMemoryContext === "function"
+      ? getMemoryContext(message, { advanced: Boolean(payload.advanced_mode || payload.advancedMode) })
+      : null;
     appendMessage(conversation, "user", message, {
       file_id: payload.file_id || null,
       task_id: payload.task_id || null,
-      intent
+      intent,
+      memory_context: memoryContext?.summary || null,
+      project_workspace: projectWorkspace.relativeRoot,
+      project_memory: projectMemory.slice(0, 2000)
     });
 
     let response;
@@ -652,7 +663,7 @@ function createChatAgent({
     } else if (intent === "quick_query") {
       try {
         const quickResult = typeof executeQuickQuery === "function"
-          ? await executeQuickQuery({ message, executionClass: "quick_query" })
+          ? await executeQuickQuery({ message, executionClass: "quick_query", memoryContext })
           : null;
         orchestration = quickResult ? {
           status: quickResult.status,
@@ -669,14 +680,15 @@ function createChatAgent({
         command: message,
         executionMode: payload.execution_mode || payload.executionMode || "execution",
         conversationId: conversation.id,
-        executionClass
+        executionClass,
+        memoryContext
       });
       response = orchestration.workflow_id
         ? [
-            `Workflow created: ${orchestration.workflow?.name || orchestration.workflow_id}`,
+            "Working",
             `Status: ${orchestration.status}`,
-            `Workflow ID: ${orchestration.workflow_id}`,
-            orchestration.task_id ? `Task ID: ${orchestration.task_id}` : "Background execution started."
+            `Project: ${projectWorkspace.id}`,
+            orchestration.task_id ? `Task ID: ${orchestration.task_id}` : "Background work started."
           ].join("\n")
         : [
             `Task: ${orchestration.task?.title || orchestration.task_id}`,
@@ -695,7 +707,15 @@ function createChatAgent({
       intent,
       task_suggestions: taskSuggestions,
       orchestration,
-      status_report: statusReport
+      status_report: statusReport,
+      project_workspace: {
+        id: projectWorkspace.id,
+        path: projectWorkspace.relativeRoot,
+        files: projectWorkspace.linkedFiles,
+        outputs: projectWorkspace.linkedOutputs,
+        memory_file: "TERMINALX.md"
+      },
+      memory_context: payload.advanced_mode || payload.advancedMode ? memoryContext : null
     });
 
     return {
@@ -706,6 +726,14 @@ function createChatAgent({
       task_suggestions: taskSuggestions,
       orchestration,
       status_report: statusReport,
+      project_workspace: {
+        id: projectWorkspace.id,
+        path: projectWorkspace.relativeRoot,
+        files: projectWorkspace.linkedFiles,
+        outputs: projectWorkspace.linkedOutputs,
+        memory_file: "TERMINALX.md"
+      },
+      memory_context: payload.advanced_mode || payload.advancedMode ? memoryContext : null,
       task_status: statusReport?.kind === "task_status" ? statusReport.task : null,
       history_count: conversation.messages.length
     };

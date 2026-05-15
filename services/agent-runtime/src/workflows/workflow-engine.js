@@ -167,7 +167,7 @@ function dependenciesComplete(step, stepStates) {
   return (step.dependsOn || []).every((dependency) => stepStates[dependency]?.status === "completed");
 }
 
-function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, createTask, executeCodingTask, toolRegistryFactory, workflowTimeoutMs = 30000, maxConcurrentWorkflows = 1 }) {
+function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, createTask, executeCodingTask, toolRegistryFactory, intelligenceLayer = null, workflowTimeoutMs = 30000, maxConcurrentWorkflows = 1 }) {
   let activeTicks = 0;
 
   function log(action, payload = {}) {
@@ -185,6 +185,12 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
   function saveWorkflow(workflow) {
     workflow.updatedAt = nowIso();
     return saveSetting(repository, "workflows", workflow.id, workflow);
+  }
+
+  function learnIfTerminal(workflow) {
+    if (["completed", "failed"].includes(workflow.status)) {
+      intelligenceLayer?.learnFromWorkflow(workflow);
+    }
   }
 
   function createWorkflow(payload = {}) {
@@ -210,6 +216,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
         status: "pending"
       })),
       context: payload.context || {},
+      memory: intelligenceLayer?.buildExecutionContext(payload.goal || payload.name || template?.description || "") || null,
       timeline: [{ status: "planning", message: "Workflow created", createdAt: nowIso() }],
       createdAt: nowIso(),
       updatedAt: nowIso()
@@ -266,6 +273,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
     job.error = message;
     workflow.timeline.push({ status: "failed", step: currentStep?.id, message, createdAt: nowIso() });
     saveWorkflow(workflow);
+    learnIfTerminal(workflow);
     saveJob(job);
     log("failed", { workflowId: workflow.id, jobId: job.id, error: message });
     return { status: "failed", workflow, activeJob: job };
@@ -606,6 +614,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
         : "running";
     workflow.timeline.push({ status: workflow.status, message: workflow.status === "completed" ? "Workflow completed" : "Workflow updated", createdAt: nowIso() });
     saveWorkflow(workflow);
+    learnIfTerminal(workflow);
 
     listJobs()
       .filter((job) => job.workflowId === workflow.id && ["queued", "running", "retrying", "waiting_approval"].includes(job.status))
@@ -672,6 +681,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
           workflow.timeline.push({ status: "completed", message: "Workflow completed", createdAt: nowIso() });
         }
         saveWorkflow(workflow);
+        learnIfTerminal(workflow);
         saveJob(job);
         return { status: job.status, workflow, activeJob: job };
       }
@@ -689,6 +699,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
         workflow.timeline.push({ status: "completed", message: "Workflow completed", createdAt: nowIso() });
       }
       saveWorkflow(workflow);
+      learnIfTerminal(workflow);
       saveJob(job);
       return { status: workflow.status, workflow, activeJob: job };
     } catch (error) {
@@ -706,6 +717,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
         workflow.timeline.push({ status: "failed", message: error.message, createdAt: nowIso() });
       }
       saveWorkflow(workflow);
+      learnIfTerminal(workflow);
       saveJob(job);
       return { status: job.status, workflow, activeJob: job };
     }
@@ -746,6 +758,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
           workflow.timeline.push({ status: "completed", message: "Workflow completed", createdAt: nowIso() });
         }
         saveWorkflow(workflow);
+        learnIfTerminal(workflow);
         saveJob(job);
         return { status: job.status, workflow, activeJob: job };
       }
@@ -762,6 +775,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
         workflow.timeline.push({ status: "completed", message: "Workflow completed", createdAt: nowIso() });
       }
       saveWorkflow(workflow);
+      learnIfTerminal(workflow);
       saveJob(job);
       return { status: workflow.status, workflow, activeJob: job };
     } catch (error) {
@@ -779,6 +793,7 @@ function createWorkflowEngine({ repository, approvalQueue, appendTaskHistory, cr
         workflow.timeline.push({ status: "failed", message: error.message, createdAt: nowIso() });
       }
       saveWorkflow(workflow);
+      learnIfTerminal(workflow);
       saveJob(job);
       return { status: job.status, workflow, activeJob: job };
     } finally {
