@@ -110,7 +110,16 @@ async function testChatEscalatesActionRequests() {
     repository,
     approvalQueue,
     appendTaskHistory: repository.appendTaskHistory.bind(repository),
-    createTask: repository.createTask.bind(repository)
+    createTask: repository.createTask.bind(repository),
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async () => [{ url: "https://example.com/async", title: "Async workflow", snippet: "Async workflow source" }],
+      fetchPage: async () => "<html><title>Async workflow</title><body><p>Async workflow source text.</p></body></html>"
+    })
   });
   const chatAgent = createChatAgent({
     conversationRepository: repository,
@@ -156,8 +165,8 @@ async function testAutomaticExecutionClassificationAndQuickQuery() {
     findTask: (taskId) => repository.findTask(taskId),
     executeQuickQuery: async ({ message }) => ({
       status: "completed",
-      response: `Direct research answer for ${message}\nSources:\n- Market source: https://research.local/market`,
-      sources: [{ title: "Market source", url: "https://research.local/market" }]
+      response: `Direct research answer for ${message}\nSources:\n- Market source: https://example.com/market`,
+      sources: [{ title: "Market source", url: "https://example.com/market" }]
     })
   });
   const result = await chatAgent.respond({ message: "gold price" });
@@ -199,7 +208,16 @@ async function testWorkflowLearningPersists() {
     approvalQueue,
     appendTaskHistory: repository.appendTaskHistory.bind(repository),
     createTask: repository.createTask.bind(repository),
-    intelligenceLayer: intelligence
+    intelligenceLayer: intelligence,
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async () => [{ url: "https://example.com/memory", title: "Memory persistence", snippet: "Workflow memory persistence" }],
+      fetchPage: async () => "<html><title>Memory persistence</title><body><p>Workflow memory persistence research source.</p></body></html>"
+    })
   });
   const workflow = engine.createWorkflow({ template_id: "research-workflow", name: "Memory research", goal: "research memory persistence" });
   engine.startWorkflow(workflow.id);
@@ -281,7 +299,16 @@ async function testResearchRequestQueuesWorkflow() {
     repository,
     approvalQueue,
     appendTaskHistory: repository.appendTaskHistory.bind(repository),
-    createTask: repository.createTask.bind(repository)
+    createTask: repository.createTask.bind(repository),
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async () => [{ url: "https://example.com/async", title: "Async workflow", snippet: "Async workflow source" }],
+      fetchPage: async () => "<html><title>Async workflow</title><body><p>Async workflow source text.</p></body></html>"
+    })
   });
   const chatAgent = createChatAgent({
     conversationRepository: repository,
@@ -677,11 +704,64 @@ async function testToolAuditFailureDoesNotBreakExecution() {
     agentId: "research-agent",
     logAction: () => {
       throw new Error("foreign key failed");
-    }
+    },
+    searchProvider: async () => [{ url: "https://example.com/gold", title: "Gold rate", snippet: "Gold rate Mumbai" }]
   });
   const result = await registry.execute("web-search", { query: "gold rate mumbai", limit: 1 });
   assert.equal(result.status, "completed");
   assert.equal(result.results.length, 1);
+}
+
+async function testLiveResearchToolsUseRealSources() {
+  const previousProvider = process.env.WEB_SEARCH_PROVIDER;
+  const previousKey = process.env.SERPER_API_KEY;
+  process.env.WEB_SEARCH_PROVIDER = "serper";
+  process.env.SERPER_API_KEY = "test-key";
+  const calls = [];
+  const registry = createToolRegistry({
+    agentId: "research-agent",
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, options });
+      if (String(url).includes("serper")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            organic: [
+              { link: "https://example.com/gold", title: "Mumbai gold rate", snippet: "Live rate context" },
+              { link: "http://localhost/private", title: "Blocked", snippet: "bad" }
+            ]
+          })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "<html><head><title>Gold page</title><meta name=\"description\" content=\"Gold data\"></head><body><h1>Gold in Mumbai</h1><p>Today gold prices are updated by jewellers and market feeds.</p></body></html>"
+      };
+    },
+    llmProvider: {
+      async sendMessage({ message }) {
+        return { text: `Live answer with citations\n${message.includes("https://example.com/gold") ? "Source included" : ""}` };
+      }
+    }
+  });
+  const search = await registry.execute("web-search", { query: "todays gold rate in mumbai", limit: 3 });
+  assert.equal(search.status, "completed");
+  assert.equal(search.results.length, 1);
+  assert.equal(search.results[0].url, "https://example.com/gold");
+  const fetched = await registry.execute("page-fetch", { url: search.results[0].url, retries: 0 });
+  assert.equal(fetched.title, "Gold page");
+  const extracted = await registry.execute("text-extract", { url: fetched.url, html: fetched.html });
+  assert.equal(extracted.headings[0], "Gold in Mumbai");
+  assert.equal(extracted.metadata.description, "Gold data");
+  const summary = await registry.execute("summarize-content", { query: "todays gold rate in mumbai", documents: [extracted] });
+  assert.match(summary.summary, /Live answer/);
+  await assert.rejects(() => registry.execute("page-fetch", { url: "file:///etc/passwd" }), /Blocked unsafe protocol/);
+  await assert.rejects(() => registry.execute("page-fetch", { url: "http://127.0.0.1:8787" }), /Blocked local/);
+  assert.equal(calls.some((call) => JSON.stringify(call).includes("research.local")), false);
+  if (previousProvider === undefined) delete process.env.WEB_SEARCH_PROVIDER; else process.env.WEB_SEARCH_PROVIDER = previousProvider;
+  if (previousKey === undefined) delete process.env.SERPER_API_KEY; else process.env.SERPER_API_KEY = previousKey;
 }
 
 async function testProjectChatWorkspaceAndMemoryFile() {
@@ -1111,7 +1191,16 @@ async function testAsyncWorkflowBackgroundExecution() {
     repository,
     approvalQueue,
     appendTaskHistory: repository.appendTaskHistory.bind(repository),
-    createTask: repository.createTask.bind(repository)
+    createTask: repository.createTask.bind(repository),
+    toolRegistryFactory: (taskId, agentId) => createToolRegistry({
+      taskId,
+      agentId,
+      approvalQueue,
+      logAction: repository.logAction.bind(repository),
+      appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async () => [{ url: "https://example.com/async", title: "Async workflow", snippet: "Async workflow source" }],
+      fetchPage: async () => "<html><title>Async workflow</title><body><p>Async workflow source text.</p></body></html>"
+    })
   });
   const workflow = engine.createWorkflow({ template_id: "research-workflow", name: "Async research", goal: "async workflow" });
   const started = engine.startWorkflow(workflow.id);
@@ -1203,6 +1292,11 @@ async function testResearchWorkflowCompletes() {
       approvalQueue,
       logAction: repository.logAction.bind(repository),
       appendTaskHistory: repository.appendTaskHistory.bind(repository),
+      searchProvider: async (query, limit) => Array.from({ length: limit }, (_unused, index) => ({
+        url: `https://sources.example.com/${index + 1}`,
+        title: `${query} live source ${index + 1}`,
+        snippet: `${query} current source ${index + 1}`
+      })),
       fetchPage: async (url, attempt) => {
         fetchAttempts[url] = attempt;
         if (url.includes("/1") && attempt === 1) {
@@ -1861,6 +1955,7 @@ async function testRbacHttpFlow() {
       LLM_PROVIDER: "mock",
       TERMINALX_PORT: String(port),
       TERMINALX_ENV: "development",
+      TERMINALX_TEST_WEB_SEARCH_FIXTURE: "true",
       ADMIN_EMAIL: "admin@terminalx.local",
       ADMIN_PASSWORD: "change-me-now"
     },
@@ -2046,6 +2141,7 @@ async function main() {
   await testFileStorageProviders();
   await testExecutionWorkspaceTools();
   await testToolAuditFailureDoesNotBreakExecution();
+  await testLiveResearchToolsUseRealSources();
   await testProjectChatWorkspaceAndMemoryFile();
   testServerlessWorkspaceUsesWritableTempRoot();
   await testFileEditDiffApprovalAndApply();

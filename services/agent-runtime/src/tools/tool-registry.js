@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const net = require("node:net");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
@@ -114,6 +115,108 @@ function titleFromHtml(html = "", fallback = "Untitled source") {
   return String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() || fallback;
 }
 
+function assertSafeHttpUrl(rawUrl = "") {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Invalid URL.");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Blocked unsafe protocol.");
+  const host = parsed.hostname.toLowerCase();
+  if (["localhost", "0.0.0.0"].includes(host) || host.endsWith(".localhost") || host.endsWith(".local")) {
+    throw new Error("Blocked local/internal host.");
+  }
+  if (net.isIP(host)) {
+    const parts = host.split(".").map(Number);
+    if (host === "127.0.0.1" || host === "::1" || parts[0] === 10 || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) || (parts[0] === 192 && parts[1] === 168) || (parts[0] === 169 && parts[1] === 254)) {
+      throw new Error("Blocked local/internal network.");
+    }
+  }
+  return parsed.toString();
+}
+
+async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Math.min(Number(timeoutMs || 8000), 15000)));
+  try {
+    return await fetchImpl(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeSearchResults(items = [], limit = 3) {
+  return items
+    .map((item) => ({
+      url: item.url || item.link,
+      title: stripHtml(item.title || item.name || item.url || "Untitled source").slice(0, 160),
+      snippet: stripHtml(item.snippet || item.description || item.content || "").slice(0, 300)
+    }))
+    .filter((item) => {
+      try {
+        item.url = assertSafeHttpUrl(item.url);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .slice(0, limit);
+}
+
+async function providerWebSearch(query, limit, fetchImpl) {
+  const provider = String(process.env.WEB_SEARCH_PROVIDER || "").toLowerCase();
+  if (provider === "serper" && process.env.SERPER_API_KEY) {
+    const response = await fetchWithTimeout(fetchImpl, "https://google.serper.dev/search", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": process.env.SERPER_API_KEY },
+      body: JSON.stringify({ q: query, num: limit })
+    });
+    if (!response.ok) throw new Error(`Serper search failed: ${response.status}`);
+    const data = await response.json();
+    return normalizeSearchResults(data.organic || data.news || [], limit);
+  }
+  if (provider === "tavily" && process.env.TAVILY_API_KEY) {
+    const response = await fetchWithTimeout(fetchImpl, "https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, max_results: limit })
+    });
+    if (!response.ok) throw new Error(`Tavily search failed: ${response.status}`);
+    const data = await response.json();
+    return normalizeSearchResults(data.results || [], limit);
+  }
+  if (provider === "brave" && process.env.BRAVE_SEARCH_API_KEY) {
+    const response = await fetchWithTimeout(fetchImpl, `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`, {
+      headers: { accept: "application/json", "x-subscription-token": process.env.BRAVE_SEARCH_API_KEY }
+    });
+    if (!response.ok) throw new Error(`Brave search failed: ${response.status}`);
+    const data = await response.json();
+    return normalizeSearchResults(data.web?.results || [], limit);
+  }
+  const response = await fetchWithTimeout(fetchImpl, `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+    headers: { "user-agent": "TerminalX/1.0" }
+  });
+  if (!response.ok) throw new Error(`DuckDuckGo search failed: ${response.status}`);
+  const html = await response.text();
+  const matches = [...html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/gi)];
+  return normalizeSearchResults(matches.map((match) => {
+    const url = decodeURIComponent(String(match[1]).replace(/^\/l\/\?kh=-1&uddg=/, ""));
+    return { url, title: match[2], snippet: match[3] || "" };
+  }), limit);
+}
+
+function extractReadableHtml(html = "", fallbackTitle = "") {
+  const title = stripHtml(titleFromHtml(html, fallbackTitle)).slice(0, 160);
+  const metadata = {
+    description: stripHtml(String(html).match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)/i)?.[1] || "")
+  };
+  const headings = [...String(html).matchAll(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/gi)].map((match) => stripHtml(match[1])).filter(Boolean).slice(0, 12);
+  const paragraphs = [...String(html).matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)].map((match) => stripHtml(match[1])).filter((text) => text.length > 25).slice(0, 20);
+  const text = [...headings, ...paragraphs].join("\n").slice(0, 5000) || stripHtml(html).slice(0, 5000);
+  return { title, metadata, headings, paragraphs, text };
+}
+
 function providerRequired(name) {
   throw new Error(`${name} provider is not configured on the server.`);
 }
@@ -179,13 +282,11 @@ function createToolRegistry(context = {}) {
       async execute(input) {
         const query = String(input.query || "TerminalX research").trim();
         const limit = Math.max(1, Math.min(Number(input.limit || 3), 5));
+        const fetchImpl = context.fetchImpl || globalThis.fetch;
+        if (!fetchImpl && !context.searchProvider) throw new Error("No web search provider or fetch implementation configured.");
         const provided = await context.searchProvider?.(query, limit);
-        const results = (provided || Array.from({ length: limit }, (_unused, index) => ({
-          url: `https://research.local/${encodeURIComponent(query)}/${index + 1}`,
-          title: `${query} source ${index + 1}`,
-          snippet: `Research source ${index + 1} about ${query}.`
-        }))).slice(0, limit);
-        const output = { status: "completed", query, results, searchedAt: new Date().toISOString() };
+        const results = normalizeSearchResults(provided || await providerWebSearch(query, limit, fetchImpl), limit);
+        const output = { status: results.length ? "completed" : "failed", query, results, searchedAt: new Date().toISOString() };
         audit(context, "web-search", output);
         return output;
       }
@@ -198,17 +299,22 @@ function createToolRegistry(context = {}) {
       riskLevel: "low",
       approvalRequired: false,
       async execute(input) {
+        const safeUrl = assertSafeHttpUrl(input.url);
+        const fetchImpl = context.fetchImpl || globalThis.fetch;
         const retries = Math.max(0, Math.min(Number(input.retries ?? 2), 3));
         let lastError = null;
         for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
           try {
             const html = context.fetchPage
-              ? await context.fetchPage(input.url, attempt)
-              : `<html><title>${input.url}</title><body>Research notes from ${input.url}. This source discusses ${input.url} with useful facts and context.</body></html>`;
+              ? await context.fetchPage(safeUrl, attempt)
+              : await fetchWithTimeout(fetchImpl, safeUrl, { headers: { "user-agent": "TerminalX/1.0" } }, input.timeoutMs).then(async (response) => {
+                  if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+                  return response.text();
+                });
             const result = {
               status: "fetched",
-              url: input.url,
-              title: titleFromHtml(html, input.url),
+              url: safeUrl,
+              title: titleFromHtml(html, safeUrl),
               html,
               attempts: attempt,
               fetchedAt: new Date().toISOString()
@@ -232,9 +338,9 @@ function createToolRegistry(context = {}) {
       riskLevel: "low",
       approvalRequired: false,
       async execute(input) {
-        const text = stripHtml(input.html || "").slice(0, 3000);
-        const result = { status: "extracted", url: input.url, title: input.title || titleFromHtml(input.html, input.url), text };
-        audit(context, "text-extract", { ...result, text: `[${text.length} chars]` });
+        const extracted = extractReadableHtml(input.html || "", input.title || input.url);
+        const result = { status: "extracted", url: input.url, title: input.title || extracted.title, ...extracted };
+        audit(context, "text-extract", { ...result, text: `[${result.text.length} chars]` });
         return result;
       }
     },
@@ -247,11 +353,20 @@ function createToolRegistry(context = {}) {
       approvalRequired: false,
       async execute(input) {
         const documents = input.documents || [];
-        const bullets = documents.map((doc, index) => `- ${doc.title || `Source ${index + 1}`}: ${String(doc.text || "").slice(0, 180)}`);
+        const sourceBullets = documents.map((doc, index) => `- ${doc.title || `Source ${index + 1}`}: ${String(doc.text || "").slice(0, 220)}\n  Source: ${doc.url || "unknown"}`);
+        const prompt = `Query: ${input.query}\n\nSources:\n${sourceBullets.join("\n")}`;
+        const llmText = context.llmProvider?.sendMessage
+          ? await context.llmProvider.sendMessage({
+              system: "Summarize live web research concisely. Include factual caveats and cite source titles/URLs from the provided text.",
+              message: prompt,
+              temperature: 0.2,
+              maxTokens: 700
+            }).then((result) => result.text || result.content || "").catch(() => "")
+          : "";
         const result = {
           status: "summarized",
           query: input.query || "",
-          summary: `# Research Summary\n\nTopic: ${input.query || "Research"}\n\n## Findings\n\n${bullets.join("\n") || "- No source text extracted."}\n`,
+          summary: llmText || `# Research Summary\n\nTopic: ${input.query || "Research"}\n\n## Findings\n\n${sourceBullets.join("\n") || "- No source text extracted."}\n`,
           sourceCount: documents.length,
           summarizedAt: new Date().toISOString()
         };

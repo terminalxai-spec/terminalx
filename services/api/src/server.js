@@ -106,7 +106,18 @@ function taskToolRegistry(taskId, agentId = "coding-agent") {
     agentId,
     approvalQueue,
     logAction: database.logAction?.bind(database),
-    appendTaskHistory: database.appendTaskHistory?.bind(database)
+    appendTaskHistory: database.appendTaskHistory?.bind(database),
+    llmProvider,
+    searchProvider: process.env.TERMINALX_TEST_WEB_SEARCH_FIXTURE === "true"
+      ? async (query, limit) => Array.from({ length: limit }, (_unused, index) => ({
+          url: `https://example.com/test-source-${index + 1}`,
+          title: `${query} test source ${index + 1}`,
+          snippet: `Test source for ${query}`
+        }))
+      : undefined,
+    fetchPage: process.env.TERMINALX_TEST_WEB_SEARCH_FIXTURE === "true"
+      ? async (url) => `<html><title>${url}</title><body><p>Test research content for ${url}.</p></body></html>`
+      : undefined
   });
 }
 
@@ -124,7 +135,8 @@ function formatQuickQueryAnswer(message, summary, sources = []) {
 async function executeQuickQuery({ message, memoryContext = null }) {
   const registry = createToolRegistry({
     agentId: "research-agent",
-    logAction: database.logAction?.bind(database)
+    logAction: database.logAction?.bind(database),
+    llmProvider
   });
 
   try {
