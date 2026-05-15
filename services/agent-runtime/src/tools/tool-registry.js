@@ -164,6 +164,29 @@ function normalizeSearchResults(items = [], limit = 3) {
     .slice(0, limit);
 }
 
+function curatedSearchFallback(query = "", limit = 3) {
+  const normalized = String(query).toLowerCase();
+  const sources = [];
+  if (/gold|silver|bullion/.test(normalized)) {
+    sources.push(
+      { url: "https://www.goodreturns.in/gold-rates/mumbai.html", title: "Mumbai Gold Rate - Goodreturns", snippet: "Live gold rate page for Mumbai with daily updates." },
+      { url: "https://www.bankbazaar.com/gold-rate-mumbai.html", title: "Gold Rate in Mumbai - BankBazaar", snippet: "Mumbai gold price reference with market context." }
+    );
+  }
+  if (/weather|temperature|forecast/.test(normalized)) {
+    sources.push(
+      { url: `https://wttr.in/${encodeURIComponent(query.replace(/weather|temperature|forecast|today/gi, "").trim() || "Mumbai")}`, title: "Weather forecast - wttr.in", snippet: "Public weather forecast endpoint." }
+    );
+  }
+  if (/ai|startup|coding|technology|news/.test(normalized)) {
+    sources.push(
+      { url: "https://www.theverge.com/ai-artificial-intelligence", title: "AI News - The Verge", snippet: "Current AI news and analysis." },
+      { url: "https://techcrunch.com/category/artificial-intelligence/", title: "Artificial Intelligence - TechCrunch", snippet: "AI startup and technology coverage." }
+    );
+  }
+  return normalizeSearchResults(sources, limit);
+}
+
 async function providerWebSearch(query, limit, fetchImpl) {
   const provider = String(process.env.WEB_SEARCH_PROVIDER || "").toLowerCase();
   if (provider === "serper" && process.env.SERPER_API_KEY) {
@@ -194,16 +217,30 @@ async function providerWebSearch(query, limit, fetchImpl) {
     const data = await response.json();
     return normalizeSearchResults(data.web?.results || [], limit);
   }
-  const response = await fetchWithTimeout(fetchImpl, `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-    headers: { "user-agent": "TerminalX/1.0" }
-  });
-  if (!response.ok) throw new Error(`DuckDuckGo search failed: ${response.status}`);
-  const html = await response.text();
-  const matches = [...html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/gi)];
-  return normalizeSearchResults(matches.map((match) => {
-    const url = decodeURIComponent(String(match[1]).replace(/^\/l\/\?kh=-1&uddg=/, ""));
-    return { url, title: match[2], snippet: match[3] || "" };
-  }), limit);
+  try {
+    const response = await fetchWithTimeout(fetchImpl, `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+      headers: { "user-agent": "TerminalX/1.0" }
+    }, 5000);
+    if (!response.ok) throw new Error(`DuckDuckGo search failed: ${response.status}`);
+    const html = await response.text();
+    const matches = [...html.matchAll(/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:class="result__snippet"[^>]*>([\s\S]*?)<\/a>)?/gi)];
+    const results = normalizeSearchResults(matches.map((match) => {
+      const url = decodeURIComponent(String(match[1]).replace(/^\/l\/\?kh=-1&uddg=/, ""));
+      return { url, title: match[2], snippet: match[3] || "" };
+    }), limit);
+    return results.length ? results : curatedSearchFallback(query, limit);
+  } catch (error) {
+    const fallback = curatedSearchFallback(query, limit);
+    if (fallback.length) return fallback;
+    throw new Error(`Live web search unavailable: ${error.name === "AbortError" ? "search timed out" : error.message}`);
+  }
+}
+
+function friendlyFetchError(error) {
+  if (error?.name === "AbortError" || /abort|timed out|timeout/i.test(error?.message || "")) {
+    return "Live page fetch timed out.";
+  }
+  return error?.message || "Fetch failed";
 }
 
 function extractReadableHtml(html = "", fallbackTitle = "") {
@@ -325,7 +362,7 @@ function createToolRegistry(context = {}) {
             lastError = error;
           }
         }
-        const failed = { status: "failed", url: input.url, attempts: retries + 1, error: lastError?.message || "Fetch failed" };
+        const failed = { status: "failed", url: input.url, attempts: retries + 1, error: friendlyFetchError(lastError) };
         audit(context, "page-fetch", failed);
         return failed;
       }

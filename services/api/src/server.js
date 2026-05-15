@@ -170,9 +170,12 @@ async function executeQuickQuery({ message, memoryContext = null }) {
       sources: search.results || []
     };
   } catch (error) {
+    const message = /abort|timed out|timeout/i.test(error.message)
+      ? "Live web search timed out. Add SERPER_API_KEY, TAVILY_API_KEY, or BRAVE_SEARCH_API_KEY in Vercel for faster live answers."
+      : error.message;
     return {
       status: "failed",
-      response: `Execution error: ${error.message}`,
+      response: `Execution error: ${message}`,
       sources: []
     };
   }

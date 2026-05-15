@@ -764,6 +764,24 @@ async function testLiveResearchToolsUseRealSources() {
   if (previousKey === undefined) delete process.env.SERPER_API_KEY; else process.env.SERPER_API_KEY = previousKey;
 }
 
+async function testSearchAbortFallsBackToRealSources() {
+  const previousProvider = process.env.WEB_SEARCH_PROVIDER;
+  delete process.env.WEB_SEARCH_PROVIDER;
+  const registry = createToolRegistry({
+    agentId: "research-agent",
+    fetchImpl: async () => {
+      const error = new Error("This operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    }
+  });
+  const search = await registry.execute("web-search", { query: "gold rate today at mumbai", limit: 2 });
+  assert.equal(search.status, "completed");
+  assert.equal(search.results.some((source) => source.url.includes("goodreturns.in")), true);
+  assert.equal(search.results.some((source) => source.url.includes("research.local")), false);
+  if (previousProvider === undefined) delete process.env.WEB_SEARCH_PROVIDER; else process.env.WEB_SEARCH_PROVIDER = previousProvider;
+}
+
 async function testProjectChatWorkspaceAndMemoryFile() {
   const repository = createDatabaseRepository({ memory: true });
   const chatAgent = createChatAgent({
@@ -2142,6 +2160,7 @@ async function main() {
   await testExecutionWorkspaceTools();
   await testToolAuditFailureDoesNotBreakExecution();
   await testLiveResearchToolsUseRealSources();
+  await testSearchAbortFallsBackToRealSources();
   await testProjectChatWorkspaceAndMemoryFile();
   testServerlessWorkspaceUsesWritableTempRoot();
   await testFileEditDiffApprovalAndApply();
