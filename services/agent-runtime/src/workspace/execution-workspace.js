@@ -1,8 +1,15 @@
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 function workspaceBaseRoot() {
-  return path.resolve(process.env.TERMINALX_EXECUTION_ROOT || path.join(process.cwd(), "storage", "workspaces"));
+  if (process.env.TERMINALX_EXECUTION_ROOT) {
+    return path.resolve(process.env.TERMINALX_EXECUTION_ROOT);
+  }
+  if (process.env.VERCEL || process.cwd().startsWith("/var/task")) {
+    return path.join(os.tmpdir(), "terminalx", "workspaces");
+  }
+  return path.resolve(path.join(process.cwd(), "storage", "workspaces"));
 }
 
 function slugForTask(taskOrId) {

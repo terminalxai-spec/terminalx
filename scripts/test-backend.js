@@ -16,7 +16,7 @@ const { createApprovalQueue } = require("../services/agent-runtime/src/approvals
 const { createStorageService } = require("../services/file-service/src/storage");
 const { createToolRegistry } = require("../services/agent-runtime/src/tools/tool-registry");
 const { createIntelligenceLayer } = require("../services/agent-runtime/src/intelligence/memory");
-const { createProjectChatWorkspace, createTaskWorkspace, readProjectMemory, resolveWorkspacePath } = require("../services/agent-runtime/src/workspace/execution-workspace");
+const { createProjectChatWorkspace, createTaskWorkspace, readProjectMemory, resolveWorkspacePath, workspaceBaseRoot } = require("../services/agent-runtime/src/workspace/execution-workspace");
 const { createWorkflowEngine } = require("../services/agent-runtime/src/workflows/workflow-engine");
 const {
   createSessionToken,
@@ -698,6 +698,26 @@ async function testProjectChatWorkspaceAndMemoryFile() {
   assert.equal(result.project_workspace.memory_file, "TERMINALX.md");
   assert.doesNotMatch(result.response, /CEO Agent|Chat Agent|Coding Agent|routing/i);
   repository.close();
+}
+
+function testServerlessWorkspaceUsesWritableTempRoot() {
+  const previousRoot = process.env.TERMINALX_EXECUTION_ROOT;
+  const previousVercel = process.env.VERCEL;
+  delete process.env.TERMINALX_EXECUTION_ROOT;
+  process.env.VERCEL = "1";
+  const root = workspaceBaseRoot().replaceAll("\\", "/");
+  assert.match(root, /terminalx\/workspaces$/);
+  assert.doesNotMatch(root, /\/var\/task\/storage/);
+  if (previousRoot === undefined) {
+    delete process.env.TERMINALX_EXECUTION_ROOT;
+  } else {
+    process.env.TERMINALX_EXECUTION_ROOT = previousRoot;
+  }
+  if (previousVercel === undefined) {
+    delete process.env.VERCEL;
+  } else {
+    process.env.VERCEL = previousVercel;
+  }
 }
 
 async function testFileEditDiffApprovalAndApply() {
@@ -2027,6 +2047,7 @@ async function main() {
   await testExecutionWorkspaceTools();
   await testToolAuditFailureDoesNotBreakExecution();
   await testProjectChatWorkspaceAndMemoryFile();
+  testServerlessWorkspaceUsesWritableTempRoot();
   await testFileEditDiffApprovalAndApply();
   await testTerminalAndGitSafetyTools();
   await testRepositoryUnderstandingBeforeEdit();
